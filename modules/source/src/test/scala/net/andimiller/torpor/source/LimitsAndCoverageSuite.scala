@@ -161,6 +161,19 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
     }
   }
 
+  test("startup merges and checks coverage, raising every problem at once") {
+    import cats.effect.unsafe.implicits.global
+
+    assert(Torpor[IO](sources()*).startup.attempt.unsafeRunSync().isRight)
+
+    Torpor[IO](sources(serveOwners = false)*).startup.attempt.unsafeRunSync() match {
+      case Right(_)    => fail("expected startup to refuse an unserved field")
+      case Left(error) =>
+        assert(error.isInstanceOf[TorporStartupException], error.toString)
+        assert(error.getMessage.contains("Pet.owner"), error.getMessage)
+    }
+  }
+
   test("the request path applies the limits") {
     val sourceList = sources()
     val torpor     = Torpor[IO](sourceList*).withLimits(Planner.Limits(maxDepth = 1))

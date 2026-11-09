@@ -106,16 +106,9 @@ object Main extends IOApp {
       .default[IO]
       .build
       .use { client =>
-        val api    =
-          EsiApi.http[IO](client, EsiConfig(userAgent = "torpor-example/0.1 (github.com/andimiller/torpor)"))
-        val torpor = EsiGraphQL.torpor(api)
-        val schema = EsiGraphQL.schema(api)
+        val api = EsiApi.http[IO](client, EsiConfig(userAgent = "torpor-example/0.1 (github.com/andimiller/torpor)"))
 
-        val checked = torpor.checkCoverage(schema).leftMap { errors =>
-          new IllegalStateException(errors.toChain.toList.map(_.render).mkString("; "))
-        }
-
-        IO.fromEither(checked) *>
+        EsiGraphQL.torpor(api).startup.flatMap { case (torpor, schema) =>
           EmberServerBuilder
             .default[IO]
             .withHost(host"0.0.0.0")
@@ -123,6 +116,7 @@ object Main extends IOApp {
             .withHttpApp(Router("/" -> TorporHttp.routes(torpor, schema)).orNotFound)
             .build
             .useForever
+        }
       }
       .handleErrorWith(error => IO.println(error.getMessage).as(ExitCode.Error))
 }

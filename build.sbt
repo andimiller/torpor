@@ -162,13 +162,14 @@ lazy val esiCaliban = (project in file("examples/esi-caliban"))
 
 // README.md is generated: edit doc-src/README.md, then `sbt docs/mdoc`.
 lazy val docs = (project in file("docs-mdoc"))
-  .dependsOn(source, macros, examplesSharedEsi)
+  .dependsOn(source, macros, http, examplesSharedEsi)
   .enablePlugins(MdocPlugin)
   .settings(commonSettings)
   .settings(
     name           := "torpor-docs",
     publish / skip := true,
     mdocIn         := (ThisBuild / baseDirectory).value / "doc-src",
+    libraryDependencies += "org.http4s" %% "http4s-ember-server" % http4sVersion,
     mdocOut        := (ThisBuild / baseDirectory).value
   )
 

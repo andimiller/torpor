@@ -7,6 +7,10 @@ import io.circe.Json
 import net.andimiller.torpor.core.{Executor, FieldCoordinate, Plan, Resolver, Response, Value}
 import net.andimiller.torpor.schema.{Executable, Introspection, Schema, SdlFragment, ValidationError}
 
+/** Everything that stopped a service from starting: merge errors, then coverage errors. */
+final class TorporStartupException(val problems: List[String])
+    extends RuntimeException(s"torpor cannot start:\n${problems.mkString("\n")}")
+
 /** Why a registered field cannot be served at startup. */
 enum CoverageError(val render: String) {
   case MissingResolver(source: String, coordinate: FieldCoordinate)
@@ -49,7 +53,21 @@ final class Torpor[F[_]: Concurrent](sources: List[Source[F]], limits: Planner.L
   def withLimits(limits: Planner.Limits): Torpor[F] = new Torpor[F](sources, limits)
 
   def schema: Either[NonEmptyChain[net.andimiller.torpor.schema.SchemaError], Schema] =
-    Schema.merge(sources.map(source => SdlFragment(source.id, source.sdl)))
+    // a source may exist only to serve fields another source declares, so a blank fragment is not an error
+    Schema.merge(sources.filter(_.sdl.nonEmpty).map(source => SdlFragment(source.id, source.sdl)))
+
+  /** Merge and check coverage in one step, raising one exception with every problem. Servable construction goes through
+    * here, so no route can be built from a schema whose unserved fields nobody checked.
+    */
+  def startup: F[(Torpor[F], Schema)] =
+    schema match {
+      case Left(errors)  => Concurrent[F].raiseError(new TorporStartupException(errors.toChain.toList.map(_.render)))
+      case Right(merged) =>
+        checkCoverage(merged) match {
+          case Left(errors) => Concurrent[F].raiseError(new TorporStartupException(errors.toChain.toList.map(_.render)))
+          case Right(())    => Concurrent[F].pure((this, merged))
+        }
+    }
 
   /** Every field a source declares via `extend type` needs a resolver, and so does every root field. Anything else is
     * returned by whatever produced the value, so a resolver for it is a mistake worth reporting.
