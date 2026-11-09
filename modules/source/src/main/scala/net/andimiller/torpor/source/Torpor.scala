@@ -1,0 +1,127 @@
+package net.andimiller.torpor.source
+
+import cats.data.NonEmptyChain
+import cats.data.Chain
+import cats.effect.Concurrent
+import io.circe.Json
+import net.andimiller.torpor.core.{Executor, FieldCoordinate, Plan, Resolver, Response, Value}
+import net.andimiller.torpor.schema.{Executable, Introspection, Schema, SdlFragment, ValidationError}
+
+/** Why a registered field cannot be served at startup. */
+enum CoverageError(val render: String) {
+  case MissingResolver(source: String, coordinate: FieldCoordinate)
+      extends CoverageError(
+        s"no resolver for ${coordinate.render} in source '$source'; the field is declared by that source's SDL, so it must be served"
+      )
+
+  case UnexpectedResolver(source: String, coordinate: FieldCoordinate)
+      extends CoverageError(
+        s"resolver for ${coordinate.render} in source '$source' has no field to serve; it is either not in the SDL or not an extension field"
+      )
+}
+
+/** A failed request, before or during planning. */
+enum QueryError                        {
+  case Validation(errors: NonEmptyChain[ValidationError])
+  case Planning(errors: NonEmptyChain[PlanError])
+
+  def render: List[String] =
+    this match {
+      case Validation(errors) => errors.toChain.toList.map(_.render)
+      case Planning(errors)   => errors.toChain.toList.map(_.render)
+    }
+}
+
+/** The facade: merge sources into a schema, check coverage, plan a request, run it.
+  *
+  * The registry is built once. `checkCoverage` is the startup gate: it reports every SDL field that has no resolver and
+  * every resolver that has no field, before any request arrives.
+  */
+final class Torpor[F[_]: Concurrent](sources: List[Source[F]], limits: Planner.Limits = Planner.Limits.none) {
+
+  private val registry: Map[(String, FieldCoordinate), Resolver[F]] =
+    sources
+      .flatMap(source =>
+        source.resolvers.entries.map { case (coordinate, resolver) => (source.id -> coordinate) -> resolver }
+      )
+      .toMap
+
+  def withLimits(limits: Planner.Limits): Torpor[F] = new Torpor[F](sources, limits)
+
+  def schema: Either[NonEmptyChain[net.andimiller.torpor.schema.SchemaError], Schema] =
+    Schema.merge(sources.map(source => SdlFragment(source.id, source.sdl)))
+
+  /** Every field a source declares via `extend type` needs a resolver, and so does every root field. Anything else is
+    * returned by whatever produced the value, so a resolver for it is a mistake worth reporting.
+    */
+  def checkCoverage(schema: Schema): Either[NonEmptyChain[CoverageError], Unit] = {
+    val extensionFields = schema.types.values.toList.flatMap { tpe =>
+      tpe.fields.filter(_.fromExtension).map(field => field.origin.source -> FieldCoordinate(tpe.name, field.name))
+    }
+    val rootFields      =
+      List(schema.query, schema.mutation, schema.subscription).flatten.flatMap(schema.types.get).flatMap { tpe =>
+        tpe.fields.map(field => field.origin.source -> FieldCoordinate(tpe.name, field.name))
+      }
+
+    val required   = (extensionFields ++ rootFields).toSet
+    val registered = registry.keySet
+
+    val missing    = (required -- registered).toList.sortBy(_._2.render).map { case (source, coordinate) =>
+      CoverageError.MissingResolver(source, coordinate)
+    }
+    val unexpected = (registered -- required).toList.sortBy(_._2.render).map { case (source, coordinate) =>
+      CoverageError.UnexpectedResolver(source, coordinate)
+    }
+
+    NonEmptyChain.fromSeq(missing ++ unexpected).toLeft(())
+  }
+
+  private[source] def resolverFor(source: String, coordinate: FieldCoordinate): Option[Resolver[F]] =
+    registry.get(source -> coordinate)
+
+  /** A durable runtime: same sources, but suspended runs are persisted and can be resumed after a restart. */
+  def durable(store: net.andimiller.torpor.snapshot.SnapshotStore[F]): F[Durable[F]]                =
+    Durable[F](this, store)
+
+  def run(plan: Plan): F[Response]   =
+    new Executor[F](plan, (source, coordinate) => registry.get(source -> coordinate)).run
+
+  /** The whole request path: validate, plan, run. */
+  def query(
+      schema: Schema,
+      query: String,
+      operationName: Option[String] = None,
+      variables: Map[String, Value] = Map.empty
+  ): Either[QueryError, F[Response]] =
+    // Introspection is answered from the schema: no validation, no plan, no resolvers.
+    Introspection.handle(schema, query) match {
+      case Some(data) => Right(Concurrent[F].pure(Response(data, Chain.empty)))
+      case None       => validated(schema, query, operationName, variables)
+    }
+
+  private def validated(
+      schema: Schema,
+      query: String,
+      operationName: Option[String],
+      variables: Map[String, Value]
+  ): Either[QueryError, F[Response]] =
+    Executable.validate(schema, query, operationName) match {
+      case Left(errors)     => Left(QueryError.Validation(errors))
+      case Right(validated) =>
+        Planner.build(schema, validated, variables, limits) match {
+          case Left(problems) => Left(QueryError.Planning(problems))
+          case Right(plan)    => Right(run(plan))
+        }
+    }
+}
+
+object Torpor {
+  def apply[F[_]: Concurrent](sources: Source[F]*): Torpor[F] = new Torpor[F](sources.toList)
+}
+
+object Variables {
+
+  /** Client variables are JSON; the planner only substitutes them, so no coercion happens here. */
+  def fromJson(json: Json): Map[String, Value] =
+    json.asObject.map(_.toMap.map { case (name, value) => name -> Value.fromJson(value) }).getOrElse(Map.empty)
+}
