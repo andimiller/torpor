@@ -54,6 +54,15 @@ lazy val macros = (project in file("modules/macros"))
     libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test
   )
 
+// Golden SDL: the merged contract as one reviewable .graphqls file, checked by a diff on every run.
+lazy val testkit = (project in file("modules/testkit"))
+  .dependsOn(core, schema)
+  .settings(commonSettings)
+  .settings(
+    name := "torpor-testkit",
+    libraryDependencies += "org.scalameta" %% "munit" % munitVersion
+  )
+
 lazy val source = (project in file("modules/source"))
   .dependsOn(core, schema, snapshot)
   .settings(commonSettings)
@@ -141,6 +150,7 @@ lazy val esi = (project in file("examples/esi"))
       "org.scalameta" %% "munit"               % munitVersion % Test
     )
   )
+  .dependsOn(testkit % Test)
 
 // Same ESI example, built with Caliban: standalone, so it can be read and diffed against `examples/esi` directly.
 lazy val esiCaliban = (project in file("examples/esi-caliban"))
@@ -174,7 +184,7 @@ lazy val docs = (project in file("docs-mdoc"))
   )
 
 lazy val root = (project in file("."))
-  .aggregate(core, schema, macros, source, snapshot, explain, http, conformance, examplesSharedEsi, esi, esiCaliban)
+  .aggregate(core, schema, macros, source, snapshot, explain, http, conformance, testkit, examplesSharedEsi, esi, esiCaliban)
   .settings(
     name           := "torpor",
     publish / skip := true

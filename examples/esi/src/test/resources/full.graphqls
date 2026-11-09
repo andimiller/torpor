@@ -1,0 +1,41 @@
+type Alliance {
+  id: ID!
+  name: String!
+  ticker: String!
+}
+
+type Character {
+  id: ID!
+  name: String!
+  corporation: Corporation!
+}
+
+type Constellation {
+  id: ID!
+  name: String!
+  region: Region!
+}
+
+type Corporation {
+  id: ID!
+  name: String!
+  ticker: String!
+  alliance: Alliance
+}
+
+type Query {
+  character(id: ID, name: String): Character
+  characters(ids: [ID!]!): [Character!]!
+  route(origin: ID!, destination: ID!, flag: String): [SolarSystem!]
+}
+
+type Region {
+  id: ID!
+  name: String!
+}
+
+type SolarSystem {
+  id: ID!
+  name: String!
+  constellation: Constellation!
+}

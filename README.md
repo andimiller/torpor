@@ -151,6 +151,7 @@ Not built yet — do not assume these work:
 | `torpor-snapshot` | snapshot codecs, `SnapshotStore` (in-memory + skunk) |
 | `torpor-explain` | mermaid plan, per-level call report |
 | `torpor-http` | http4s routes |
+| `torpor-testkit` | golden test for the merged contract: sources in, one `.graphqls` out, a diff if it drifts |
 
 Only `torpor-schema` may import `sangria.*` (the parser); `scripts/check-imports.sh` enforces it.
 
