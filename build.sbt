@@ -160,6 +160,18 @@ lazy val esiCaliban = (project in file("examples/esi-caliban"))
     )
   )
 
+// README.md is generated: edit doc-src/README.md, then `sbt docs/mdoc`.
+lazy val docs = (project in file("docs-mdoc"))
+  .dependsOn(source, macros, examplesSharedEsi)
+  .enablePlugins(MdocPlugin)
+  .settings(commonSettings)
+  .settings(
+    name           := "torpor-docs",
+    publish / skip := true,
+    mdocIn         := (ThisBuild / baseDirectory).value / "doc-src",
+    mdocOut        := (ThisBuild / baseDirectory).value
+  )
+
 lazy val root = (project in file("."))
   .aggregate(core, schema, macros, source, snapshot, explain, http, conformance, examplesSharedEsi, esi, esiCaliban)
   .settings(

@@ -9,34 +9,56 @@ can't answer in time, the run suspends to a table and resumes when the work fini
 Built on cats-effect and [hedgehogs](https://github.com/andimiller/hedgehogs).
 
 ```scala
-val characters = schema"""type Character { id: ID! name: String! }
-  |extend type Query { character(name: String): Character }"""
+import cats.data.NonEmptyList
+import cats.effect.IO
+import io.circe.Decoder
+import net.andimiller.torpor.examples.esi.client.*
+import net.andimiller.torpor.macros.schema
+import net.andimiller.torpor.source.*
 
+// your own types; this one is in examples/esi as well
+final case class CharacterArgs(id: Option[Long], name: Option[String]) derives Decoder
+
+// the shared ESI client from examples/shared-esi; a fake keeps this snippet runnable-free
+val esi: EsiApi[IO] = new EsiApi[IO] {
+  def characterIdByName(name: String): IO[Option[Long]]                = IO.pure(None)
+  def characters(ids: NonEmptyList[Long]): IO[Map[Long, EsiCharacter]] = IO.pure(Map.empty)
+  def corporations(ids: NonEmptyList[Long]): IO[Map[Long, EsiCorporation]] = IO.pure(Map.empty)
+  def alliances(ids: NonEmptyList[Long]): IO[Map[Long, EsiAlliance]]   = IO.pure(Map.empty)
+}
+
+// SDL is data: parsed, validated, and turned into field coordinates when this compiles.
+val characters = schema"""type Character { id: ID! name: String! }
+  |extend type Query { character(id: ID, name: String): Character }"""
+
+// A root resolver: typed arguments in, a typed value out.
 val charactersSource = Source[IO]("characters", characters.text, Resolvers[IO](
   resolver.root[IO](characters.coordinate("Query", "character")) { (args: CharacterArgs) =>
-    esi.characterByName(args.name.getOrElse(""))
+    args.id match {
+      case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
+      case None     =>
+        esi.characterIdByName(args.name.getOrElse("")).flatMap {
+          case None     => IO.pure(Option.empty[EsiCharacter])
+          case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
+        }
+    }
   }
 ))
 
+// A hydrated field: keys in, one call for the whole set, and it only runs when selected.
 val universe = schema"""type Corporation { id: ID! name: String! }
   |extend type Character { corporation: Corporation! }"""
 
 val universeSource = Source[IO]("universe", universe.text, Resolvers[IO](
   resolver.field[IO](universe.coordinate("Character", "corporation"))
     .key((character: EsiCharacter) => character.corporationId)
-    .batch((ids: NonEmptyList[Long]) => esi.corporations(ids))   // one call, however many characters
+    .batch((ids: NonEmptyList[Long]) => esi.corporations(ids))
 ))
-
-for {
-  torpor <- IO.pure(Torpor[IO](charactersSource, universeSource))
-  schema <- IO.fromEither(torpor.schema)
-  _      <- IO.fromEither(torpor.checkCoverage(schema))          // every SDL field is served
-  server <- EmberServerBuilder.default[IO]
-              .withHttpApp(TorporHttp.routes(torpor, schema).orNotFound)
-              .build
-              .useForever
-} yield ()
 ```
+
+Wire those into `Torpor[IO](charactersSource, universeSource)`, check the schema with `checkCoverage`, and hand the
+routes to ember. The runnable version of exactly that — including the ESI client, `CharacterArgs`, the coverage check
+and the server — is [`examples/esi`](examples/esi).
 
 ## Why
 
