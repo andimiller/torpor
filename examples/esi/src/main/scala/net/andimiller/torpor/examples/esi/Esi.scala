@@ -16,11 +16,14 @@ import org.http4s.server.Router
 
 final case class CharacterArgs(id: Option[Long], name: Option[String]) derives Decoder
 final case class CharacterIds(ids: List[Long]) derives Decoder
+final case class RouteArgs(origin: Long, destination: Long, flag: Option[String]) derives Decoder
 
-/** The whole GraphQL side: two sources, which is all the "optional hydration" needs.
+/** The whole GraphQL side: three sources, which is all the "optional hydration" and the fan-out need.
   *
   *   - `characters` owns `Character` and the root lookup
-  *   - `universe` extends `Character` with `corporation`, and `Corporation` with `alliance`
+  *   - `universe` extends `Character` with `corporation`, `Corporation` with `alliance`, and the route's systems down
+  *     to their region
+  *   - `routes` owns the route lookup and the two types it returns
   */
 object EsiGraphQL {
 
@@ -35,8 +38,20 @@ object EsiGraphQL {
   val universe =
     schema"""type Corporation { id: ID! name: String! ticker: String! }
       |type Alliance { id: ID! name: String! ticker: String! }
+      |type Region { id: ID! name: String! }
       |extend type Character { corporation: Corporation! }
       |extend type Corporation { alliance: Alliance }
+      |extend type SolarSystem { constellation: Constellation! }
+      |extend type Constellation { region: Region! }
+      |"""
+
+  // the route is one ESI call that returns N system ids: the fan-out the planner exists for, and the only query here
+  // that is several levels deep. The two types it returns are defined here; the fields that hydrate them are extensions
+  // in `universe`, which is what makes them plan nodes rather than inline reads.
+  val routes =
+    schema"""type SolarSystem { id: ID! name: String! }
+      |type Constellation { id: ID! name: String! }
+      |extend type Query { route(origin: ID!, destination: ID!, flag: String): [SolarSystem!] }
       |"""
 
   def sources(api: EsiApi[IO]): List[Source[IO]] = {
@@ -79,11 +94,41 @@ object EsiGraphQL {
         resolver
           .optionalField[IO](universe.coordinate("Corporation", "alliance"))
           .key((corporation: EsiCorporation) => corporation.allianceId)
-          .batch((ids: NonEmptyList[Long]) => api.alliances(ids))
+          .batch((ids: NonEmptyList[Long]) => api.alliances(ids)),
+        // one constellations call per level, however many systems are on the route
+        resolver
+          .field[IO](universe.coordinate("SolarSystem", "constellation"))
+          .key((system: EsiSolarSystem) => system.constellationId)
+          .batch((ids: NonEmptyList[Long]) => api.constellations(ids)),
+        // names is a batch endpoint, so the last level collapses into one call for every region on the route
+        resolver
+          .field[IO](universe.coordinate("Constellation", "region"))
+          .key((constellation: EsiConstellation) => constellation.regionId)
+          .batch((ids: NonEmptyList[Long]) =>
+            api.names(ids).map(_.map { case (id, name) => id -> EsiRegion(id, name) })
+          )
       )
     )
 
-    List(charactersSource, universeSource)
+    val routesSource = Source[IO](
+      "routes",
+      routes.text,
+      Resolvers[IO](
+        // the route ids are the root's own fan-out: ESI computes the route, then each system is its own request
+        resolver.root[IO](routes.coordinate("Query", "route")) { (args: RouteArgs) =>
+          api.route(args.origin, args.destination, args.flag).flatMap {
+            case None      => IO.pure(Option.empty[List[EsiSolarSystem]])
+            case Some(ids) =>
+              NonEmptyList.fromList(ids.distinct) match {
+                case None      => IO.pure(Option(List.empty[EsiSolarSystem]))
+                case Some(nel) => api.systems(nel).map(byId => Option(ids.flatMap(byId.get)))
+              }
+          }
+        }
+      )
+    )
+
+    List(charactersSource, universeSource, routesSource)
   }
 
   def torpor(api: EsiApi[IO]): Torpor[IO] = Torpor[IO](sources(api): _*)
@@ -98,6 +143,10 @@ object EsiGraphQL {
 /** `sbt "esi/run"`, then POST to http://localhost:8080/graphql:
   *
   * { character(name: "Rex") { name corporation { name alliance { name } } } }
+  *
+  * and to the same address plus `/explain` for the plan behind a query:
+  *
+  * { route(origin: 30000142, destination: 30002187) { name constellation { region { name } } } }
   */
 object Main extends IOApp {
 
@@ -113,7 +162,9 @@ object Main extends IOApp {
             .default[IO]
             .withHost(host"0.0.0.0")
             .withPort(port"8080")
-            .withHttpApp(Router("/" -> TorporHttp.routes(torpor, schema)).orNotFound)
+            .withHttpApp(
+              Router("/" -> (TorporHttp.routes(torpor, schema) <+> ExplainRoute.routes(schema))).orNotFound
+            )
             .build
             .useForever
         }

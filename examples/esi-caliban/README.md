@@ -11,6 +11,8 @@ the part the comparison is actually about. It also means the two schemas are bui
 
 Both are one file: ESI client, schema and HTTP server in the order they are used.
 
+The only thing not mirrored is torpor's `/explain`: Caliban has no plan to print.
+
 ```
 sbt "esi/run"         # torpor,  localhost:8080/graphql
 sbt "esiCaliban/run"  # Caliban, localhost:8080/graphql — run one at a time
@@ -45,19 +47,29 @@ The SDL. Caliban maps `Long` to its own `Long` scalar and has no `ID` for numeri
 ```graphql
 character(id: Long, name: String): Character   # Caliban
 character(id: ID, name: String): Character     # torpor
+route(origin: Long!, destination: Long!)       # Caliban
+route(origin: ID!, destination: ID!)           # torpor
 ```
 
 Clients send a bare number either way, so the queries above work against both. `id: Long!` also replaces torpor's
-`id: ID!` in the output. Everything else — nullability, `corporation: Corporation!`, `alliance: Alliance` — matches.
+`id: ID!` in the output. Everything else — nullability, `corporation: Corporation!`, `alliance: Alliance`, a nullable
+`route` list — matches.
 
-Both expose `characters(ids: [Long!]!): [Character!]!`, so the gap is measurable rather than asserted:
+Both expose the same fields (`characters(ids: [Long!]!): [Character!]!` and the route), so the gap is measurable
+rather than asserted. Calls are what each GraphQL layer asks the client for; requests are what the client puts on the
+wire, which is where a per-row resolver pays twice.
 
-| query | torpor | Caliban |
+| query | torpor calls / requests | Caliban calls / requests |
 |---|---|---|
-| `characters(ids: [1001, 1002, 1003]) { name }` | 1 characters call | 1 characters call |
-| `... { corporation { name } }` | 1 corporations call, 2 keys (3 rows, 2 distinct corporations) | **3** corporations calls |
+| `characters(ids: [1001, 1002, 1003]) { name }` | 1 / 2 | 3 / 6 |
+| `... { corporation { name } }` | 2 / 4 | 6 / 9 |
+| `route(origin: 4000, destination: 5000) { constellation { region { name } } }` (2 systems) | 3 / 6 | 7 / 7 |
 
-Both test suites assert their own numbers (`EsiSuite`, `EsiCalibanSuite`).
+Both test suites assert their own numbers (`EsiSuite`, `EsiCalibanSuite`). `characters/affiliation/` and
+`universe/names/` are real batches, so a plan collapses those levels and per-row resolution cannot. Corporations,
+systems and constellations have no batch endpoint in ESI, so both pay one request per key there — which is why the
+route query, the one that walks systems, is where the two counts nearly meet. Planning still helps it: the route is
+one node per level, and every level costs what it costs however many systems ESI returns.
 
 ## Reading the two files for shape
 

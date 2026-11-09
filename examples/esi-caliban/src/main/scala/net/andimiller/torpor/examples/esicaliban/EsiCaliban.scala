@@ -21,10 +21,18 @@ final case class Character(id: Long, name: String, corporation: UIO[Corporation]
 
 final case class CharacterArgs(id: Option[Long], name: Option[String]) derives Schema.SemiAuto, ArgBuilder
 final case class CharacterIds(ids: List[Long]) derives Schema.SemiAuto, ArgBuilder
+final case class RouteArgs(origin: Long, destination: Long, flag: Option[String]) derives Schema.SemiAuto, ArgBuilder
+
+final case class Region(id: Long, name: String) derives Schema.SemiAuto
+
+final case class Constellation(id: Long, name: String, region: UIO[Region]) derives Schema.SemiAuto
+
+final case class SolarSystem(id: Long, name: String, constellation: UIO[Constellation]) derives Schema.SemiAuto
 
 final case class Query(
     character: CharacterArgs => UIO[Option[Character]],
-    characters: CharacterIds => UIO[List[Character]]
+    characters: CharacterIds => UIO[List[Character]],
+    route: RouteArgs => UIO[Option[List[SolarSystem]]]
 ) derives Schema.SemiAuto
 
 object EsiCaliban {
@@ -58,6 +66,37 @@ object EsiCaliban {
         .map(_.get(id))
         .map(_.map(characterFrom))
 
+    // one system call per id: ESI has no batch endpoint, so both implementations pay it
+    def regionOf(id: Long): UIO[Region] =
+      esi
+        .names(NonEmptyList.one(id))
+        .orDie
+        .map(_.get(id))
+        .flatMap {
+          case None       => ZIO.dieMessage(s"ESI has no name for $id")
+          case Some(name) => ZIO.succeed(Region(id, name))
+        }
+
+    def constellationOf(id: Long): UIO[Constellation] =
+      esi
+        .constellations(NonEmptyList.one(id))
+        .orDie
+        .map(_.get(id))
+        .flatMap {
+          case None        => ZIO.dieMessage(s"ESI has no constellation $id")
+          case Some(found) => ZIO.succeed(Constellation(found.id, found.name, regionOf(found.regionId)))
+        }
+
+    def systemOf(id: Long): UIO[SolarSystem] =
+      esi
+        .systems(NonEmptyList.one(id))
+        .orDie
+        .map(_.get(id))
+        .flatMap {
+          case None        => ZIO.dieMessage(s"ESI has no system $id")
+          case Some(found) => ZIO.succeed(SolarSystem(found.id, found.name, constellationOf(found.constellationId)))
+        }
+
     graphQL(
       RootResolver(
         Query(
@@ -73,6 +112,15 @@ object EsiCaliban {
               case None      => ZIO.succeed(Nil)
               case Some(ids) => esi.characters(ids).orDie.map(byId => args.ids.flatMap(byId.get).map(characterFrom))
             }
+          },
+          route = { args =>
+            esi
+              .route(args.origin, args.destination, args.flag)
+              .orDie
+              .flatMap {
+                case None      => ZIO.none
+                case Some(ids) => ZIO.foreach(ids)(systemOf).map(Some(_))
+              }
           }
         )
       )

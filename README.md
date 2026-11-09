@@ -29,6 +29,11 @@ val esi: EsiApi[IO] = new EsiApi[IO] {
   def characters(ids: NonEmptyList[Long]): IO[Map[Long, EsiCharacter]]     = IO.pure(Map.empty)
   def corporations(ids: NonEmptyList[Long]): IO[Map[Long, EsiCorporation]] = IO.pure(Map.empty)
   def alliances(ids: NonEmptyList[Long]): IO[Map[Long, EsiAlliance]]       = IO.pure(Map.empty)
+  // unused here; the route example in examples/esi serves these
+  def route(origin: Long, destination: Long, flag: Option[String]): IO[Option[List[Long]]]                        = IO.pure(None)
+  def systems(ids: NonEmptyList[Long]): IO[Map[Long, EsiSolarSystem]]                                             = IO.pure(Map.empty)
+  def constellations(ids: NonEmptyList[Long]): IO[Map[Long, EsiConstellation]]                                    = IO.pure(Map.empty)
+  def names(ids: NonEmptyList[Long]): IO[Map[Long, String]]                                                       = IO.pure(Map.empty)
 }
 
 // 2. Define your GraphQL schemas, as SDL, per source. Both are parsed and validated when this compiles, and each
@@ -89,7 +94,9 @@ contract's nullability.
 
 **Batching is impossible to get wrong.** A resolver that fans out takes `NonEmptyList[K] => F[Map[K, V]]`.
 There is no single-key overload, so three characters cost one corporations call, not three — the plan groups
-each level, dedupes keys, and the test suite pins the call count.
+each level and dedupes keys. Against ESI, character rows are two batch requests for any number of ids
+(`characters/affiliation/` plus `universe/names/`), and a route's regions are one; the test suite pins the
+call counts.
 
 **A run can outlive the request.** `Step.suspend(handle)` parks the whole run: the snapshot (plan, node
 states, handles) goes to a `SnapshotStore` with compare-and-swap on a revision, so two webhooks racing to
@@ -97,7 +104,8 @@ resume cannot both execute. Resume from a fresh process with a fresh runtime; no
 needed. No workflow engine involved.
 
 **One contract, one plan.** `Plan` is plain serialisable data — the same value the executor runs, the snapshot
-stores, and `Explain.mermaid` draws. What you inspect is what executes.
+stores, and `Explain.mermaid` draws. What you inspect is what executes, before it executes: the example serves
+`POST /explain`, which prints the plan for a query without running a resolver.
 
 ## Status
 
@@ -149,9 +157,11 @@ Only `torpor-schema` may import `sangria.*` (the parser); `scripts/check-imports
 ## Example
 
 [`examples/esi`](examples/esi) is a working service over EVE Online's ESI: unauthenticated, custom User-Agent,
-lookup by id or name, optionally hydrating corporation and alliance.
-[`examples/esi-caliban`](examples/esi-caliban) is the same service in Caliban, for comparison — including the
-call counts that show why the batch signature matters.
+lookup by id or name, optionally hydrating corporation and alliance, plus a route between two solar systems
+that hydrates systems, constellations and regions — the multi-level fan-out — and a `/explain` route for the
+plan behind any query.
+[`examples/esi-caliban`](examples/esi-caliban) is the same character and corporation service in Caliban, for
+comparison — including the call counts that show why the batch signature matters.
 
 ## Build
 

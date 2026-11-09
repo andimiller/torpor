@@ -7,6 +7,7 @@ import net.andimiller.torpor.core.PathSegment
 import net.andimiller.torpor.source.{Planner, RunOutcome, Torpor}
 import net.andimiller.torpor.schema.Executable
 import org.http4s.{HttpApp, Response, Status, Uri}
+import org.http4s.circe.*
 import org.http4s.client.Client
 
 import java.util.concurrent.atomic.AtomicInteger
@@ -20,13 +21,21 @@ final class EsiSuite extends munit.CatsEffectSuite {
       charactersById: Map[Long, EsiCharacter],
       namesToIds: Map[String, Long],
       corporationsById: Map[Long, EsiCorporation],
-      alliancesById: Map[Long, EsiAlliance]
+      alliancesById: Map[Long, EsiAlliance],
+      routeByEnds: Map[(Long, Long), List[Long]] = Map.empty,
+      systemsById: Map[Long, EsiSolarSystem] = Map.empty,
+      constellationsById: Map[Long, EsiConstellation] = Map.empty,
+      namesById: Map[Long, String] = Map.empty
   ) extends EsiApi[IO] {
-    val characterCalls   = new AtomicInteger(0)
-    val nameLookups      = new AtomicInteger(0)
-    val corporationCalls = new AtomicInteger(0)
-    val allianceCalls    = new AtomicInteger(0)
-    val corporationKeys  = new AtomicInteger(0)
+    val characterCalls    = new AtomicInteger(0)
+    val nameLookups       = new AtomicInteger(0)
+    val corporationCalls  = new AtomicInteger(0)
+    val allianceCalls     = new AtomicInteger(0)
+    val corporationKeys   = new AtomicInteger(0)
+    val routeCalls        = new AtomicInteger(0)
+    val systemKeys        = new AtomicInteger(0)
+    val constellationKeys = new AtomicInteger(0)
+    val nameKeys          = new AtomicInteger(0)
 
     def characterIdByName(name: String): IO[Option[Long]] =
       IO { nameLookups.incrementAndGet(); namesToIds.get(name) }
@@ -41,8 +50,26 @@ final class EsiSuite extends munit.CatsEffectSuite {
         ids.toList.flatMap(id => corporationsById.get(id).map(id -> _)).toMap
       }
 
-    def alliances(ids: NonEmptyList[Long]): IO[Map[Long, EsiAlliance]] =
+    def alliances(ids: NonEmptyList[Long]): IO[Map[Long, EsiAlliance]]                       =
       IO { allianceCalls.incrementAndGet(); ids.toList.flatMap(id => alliancesById.get(id).map(id -> _)).toMap }
+
+    def route(origin: Long, destination: Long, flag: Option[String]): IO[Option[List[Long]]] =
+      IO { routeCalls.incrementAndGet(); routeByEnds.get(origin -> destination) }
+
+    def systems(ids: NonEmptyList[Long]): IO[Map[Long, EsiSolarSystem]]                      =
+      IO {
+        systemKeys.set(ids.size)
+        ids.toList.flatMap(id => systemsById.get(id).map(id -> _)).toMap
+      }
+
+    def constellations(ids: NonEmptyList[Long]): IO[Map[Long, EsiConstellation]] =
+      IO {
+        constellationKeys.set(ids.size)
+        ids.toList.flatMap(id => constellationsById.get(id).map(id -> _)).toMap
+      }
+
+    def names(ids: NonEmptyList[Long]): IO[Map[Long, String]] =
+      IO { nameKeys.set(ids.size); ids.toList.flatMap(id => namesById.get(id).map(id -> _)).toMap }
   }
 
   private def fake(withAlliance: Boolean = true): FakeEsi =
@@ -57,7 +84,17 @@ final class EsiSuite extends munit.CatsEffectSuite {
         2001L -> EsiCorporation(2001L, "Hedgerow Holdings", "HEDGE", if (withAlliance) Some(3001L) else None),
         2002L -> EsiCorporation(2002L, "Mochi Mining", "MOCHI", None)
       ),
-      alliancesById = Map(3001L -> EsiAlliance(3001L, "The Prickle", "PRKL"))
+      alliancesById = Map(3001L -> EsiAlliance(3001L, "The Prickle", "PRKL")),
+      routeByEnds = Map((4000L, 5000L) -> List(4001L, 4002L)),
+      systemsById = Map(
+        4001L -> EsiSolarSystem(4001L, "Jita", 5001L),
+        4002L -> EsiSolarSystem(4002L, "Amarr", 5002L)
+      ),
+      constellationsById = Map(
+        5001L -> EsiConstellation(5001L, "Kimotoro", 6001L),
+        5002L -> EsiConstellation(5002L, "Domain", 6002L)
+      ),
+      namesById = Map(6001L -> "The Forge", 6002L -> "Domain")
     )
 
   private def run(esi: FakeEsi, query: String): IO[net.andimiller.torpor.core.Response] = {
@@ -145,19 +182,111 @@ final class EsiSuite extends munit.CatsEffectSuite {
 
   test("esi paths keep their slashes and responses get their id back") {
     var seen: Option[Uri] = None
-    // a real ESI body: no id in the JSON, and snake_case fields
+    // a real ESI body: the id is in the path, not the JSON, and fields are snake_case
     val body              =
-      """{"name":"The Mittani","corporation_id":1000167,"birthday":"2005-06-08T18:24:00Z","bloodline_id":1,"gender":"male","race_id":1,"security_status":-1.0}"""
+      """{"constellation_id":20000020,"name":"Jita","security_status":0.9459,"star_id":40009076,"system_id":30000142}"""
     val app               = HttpApp[IO] { request =>
       IO { seen = Some(request.uri); Response[IO](Status.Ok).withEntity(body) }
     }
     val esi               = EsiApi.http[IO](Client.fromHttpApp(app), EsiConfig(userAgent = "test"))
-    esi.characters(NonEmptyList.one(443630591L)).map { found =>
+    esi.systems(NonEmptyList.one(30000142L)).map { found =>
       assertEquals(
         seen.map(_.renderString),
-        Some("https://esi.evetech.net/latest/characters/443630591")
+        Some("https://esi.evetech.net/latest/universe/systems/30000142")
       )
-      assertEquals(found, Map(443630591L -> EsiCharacter(443630591L, "The Mittani", 1000167L)))
+      assertEquals(found, Map(30000142L -> EsiSolarSystem(30000142L, "Jita", 20000020L)))
+    }
+  }
+
+  test("characters are two batched requests, whatever the number of ids") {
+    val paths = scala.collection.mutable.ListBuffer.empty[String]
+    val app   = HttpApp[IO] { request =>
+      IO {
+        paths += request.uri.path.renderString
+        request.uri.path.renderString match {
+          case "/latest/characters/affiliation" =>
+            Response[IO](Status.Ok).withEntity(
+              """[{"character_id":443630591,"corporation_id":1000167},{"character_id":443630592,"corporation_id":1000167}]"""
+            )
+          case "/latest/universe/names"         =>
+            Response[IO](Status.Ok).withEntity(
+              """[{"category":"character","id":443630591,"name":"The Mittani"},{"category":"character","id":443630592,"name":"Someone"}]"""
+            )
+          case other                            => Response[IO](Status.NotFound).withEntity(s"unexpected $other")
+        }
+      }
+    }
+    val esi   = EsiApi.http[IO](Client.fromHttpApp(app), EsiConfig(userAgent = "test"))
+    esi.characters(NonEmptyList.of(443630591L, 443630592L)).map { found =>
+      assertEquals(paths.toList.sorted, List("/latest/characters/affiliation", "/latest/universe/names"))
+      assertEquals(found(443630591L), EsiCharacter(443630591L, "The Mittani", 1000167L))
+      assertEquals(found(443630592L), EsiCharacter(443630592L, "Someone", 1000167L))
+    }
+  }
+
+  test("a route passes its flag and reads ESI's 404 as no route") {
+    var seen: Option[Uri] = None
+    val app               = HttpApp[IO] { request =>
+      IO { seen = Some(request.uri) } *> IO.pure(Response[IO](Status.NotFound).withEntity("no route"))
+    }
+    val esi               = EsiApi.http[IO](Client.fromHttpApp(app), EsiConfig(userAgent = "test"))
+    esi.route(30000142L, 30002187L, Some("secure")).map { route =>
+      assertEquals(route, None)
+      assertEquals(
+        seen.map(_.renderString),
+        Some("https://esi.evetech.net/latest/route/30000142/30002187?flag=secure")
+      )
+    }
+  }
+
+  test("a route hydrates every level in one call, except the systems ESI cannot batch") {
+    val esi = fake()
+    run(esi, "{ route(origin: 4000, destination: 5000) { name constellation { name region { name } } } }").map {
+      response =>
+        val route = response.data.hcursor.downField("route")
+        assertEquals(
+          route.values.map(_.flatMap(_.hcursor.get[String]("name").toOption)).map(_.toList),
+          Some(List("Jita", "Amarr"))
+        )
+        assertEquals(
+          route.values
+            .map(_.flatMap(_.hcursor.downField("constellation").downField("region").get[String]("name").toOption))
+            .map(_.toList),
+          Some(List("The Forge", "Domain"))
+        )
+        assertEquals(esi.routeCalls.get, 1)
+        assertEquals(esi.systemKeys.get, 2, "ESI has no batch system endpoint")
+        assertEquals(esi.constellationKeys.get, 2, "two systems, two constellations, one call")
+        assertEquals(esi.nameKeys.get, 2, "two regions, one names call")
+    }
+  }
+
+  test("no route is null, not an error") {
+    run(fake(), "{ route(origin: 1, destination: 2) { name } }").map { response =>
+      assert(response.data.hcursor.downField("route").focus.contains(io.circe.Json.Null))
+      assert(response.errors.isEmpty)
+    }
+  }
+
+  test("explain prints the plan without running a resolver") {
+    val esi     = fake()
+    val schema  = EsiGraphQL.schema(esi)
+    val app     = ExplainRoute.routes(schema).orNotFound
+    val request = org.http4s
+      .Request[IO](org.http4s.Method.POST, Uri.unsafeFromString("/explain"))
+      .withEntity(
+        io.circe.Json.obj(
+          "query" -> io.circe.Json.fromString(
+            "{ route(origin: 4000, destination: 5000) { name constellation { region { name } } } }"
+          )
+        )
+      )
+
+    app.run(request).flatMap(_.as[String]).map { body =>
+      assert(body.contains("flowchart LR"), body)
+      assert(body.contains("routes: Query.route"), body)
+      assert(body.contains("universe: Constellation.region"), body)
+      assertEquals(esi.routeCalls.get, 0, "explaining must not execute")
     }
   }
 

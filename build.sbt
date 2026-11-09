@@ -128,7 +128,7 @@ lazy val examplesSharedEsi = (project in file("examples/shared-esi"))
   )
 
 lazy val esi = (project in file("examples/esi"))
-  .dependsOn(core, schema, source, http, macros, examplesSharedEsi)
+  .dependsOn(core, schema, source, http, macros, explain, examplesSharedEsi)
   .settings(commonSettings)
   .settings(
     name           := "torpor-example-esi",
