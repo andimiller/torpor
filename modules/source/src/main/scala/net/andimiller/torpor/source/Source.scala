@@ -4,22 +4,24 @@ import cats.{Applicative, Functor}
 import cats.data.NonEmptyList
 import cats.syntax.all._
 import io.circe.{Decoder, Encoder, Json, parser}
-import net.andimiller.torpor.core.{Arguments, FieldCoordinate, InvalidInputException, Resolver, Step}
+import net.andimiller.torpor.core.{Arguments, FieldCoordinate, InvalidInputException, Resolver, Sdl, Step}
 
 /** A source: an SDL fragment plus the resolvers that serve it.
   *
-  * Its type keeps what the resolvers erase: `Facts` records, for each one, which GraphQL type it produces as which
-  * Scala type, and which Scala type a keyed field decodes its parent as. `Torpor[F](…)` reads them to check, when the
-  * code compiles, that every keyed field can decode what each producer of its parent type produces.
+  * Its type keeps what the resolvers erase. `Required` lists the fields its SDL needs resolved, as the `schema` macro
+  * read them. `Facts` records, for each resolver, the field it serves, which GraphQL type it produces as which Scala
+  * type, and which Scala type a keyed field decodes its parent as. `Torpor[F](…)` reads both to check, when the code
+  * compiles, that every source resolves exactly its required fields, and that every keyed field can decode what each
+  * producer of its parent type produces.
   *
   * {{{
-  * Source[IO]("universe", universe.text)(
+  * Source[IO]("universe", universe)(
   *   resolver.field[IO](universe.Character.corporation).key(…).batch(…),
   *   resolver.optionalField[IO](universe.Corporation.alliance).key(…).batch(…)
   * )
   * }}}
   */
-final class Source[F[_], Id <: String, Facts <: Tuple] private (
+final class Source[F[_], Id <: String, Required <: Tuple, Facts <: Tuple] private (
     val id: Id,
     val sdl: String,
     private[source] val entries: List[(FieldCoordinate, Resolver[F])]
@@ -30,7 +32,7 @@ final class Source[F[_], Id <: String, Facts <: Tuple] private (
     */
   def apply[Rs <: Matchable](resolvers: Rs)(using
       Facts =:= EmptyTuple
-  ): Source[F, Id, Source.FactsOf[Rs]] =
+  ): Source[F, Id, Required, Source.FactsOf[Rs]] =
     new Source(id, sdl, Source.entries(resolvers))
 }
 
@@ -47,8 +49,12 @@ object Source {
 
   final class Start[F[_]] {
 
-    /** A source with no resolvers yet; apply it to its resolvers. One that only declares types needs none. */
-    def apply[Id <: String & Singleton](id: Id, sdl: String): Source[F, Id, EmptyTuple] = new Source(id, sdl, Nil)
+    /** A source with no resolvers yet; apply it to its resolvers. One whose SDL only defines types needs none. */
+    def apply[Id <: String & Singleton, Required <: Tuple](
+        id: Id,
+        sdl: Sdl[Required]
+    ): Source[F, Id, Required, EmptyTuple] =
+      new Source(id, sdl.text, Nil)
   }
 
   private def entries[F[_]](resolvers: Matchable): List[(FieldCoordinate, Resolver[F])] = resolvers match {

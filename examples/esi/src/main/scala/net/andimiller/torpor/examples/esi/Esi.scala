@@ -33,31 +33,12 @@ object EsiGraphQL {
       |}
       |"""
 
-  val universe =
-    schema"""type Corporation { id: ID! name: String! ticker: String! }
-      |type Alliance { id: ID! name: String! ticker: String! }
-      |type Region { id: ID! name: String! }
-      |extend type Character { corporation: Corporation! }
-      |extend type Corporation { alliance: Alliance }
-      |extend type SolarSystem { constellation: Constellation! }
-      |extend type Constellation { region: Region! }
-      |"""
-
-  // the route is one ESI call that returns N system ids: the fan-out the planner exists for, and the only query here
-  // that is several levels deep. The two types it returns are defined here; the fields that hydrate them are extensions
-  // in `universe`, which is what makes them plan nodes rather than inline reads.
-  val routes =
-    schema"""type SolarSystem { id: ID! name: String! }
-      |type Constellation { id: ID! name: String! }
-      |extend type Query { route(origin: ID!, destination: ID!, flag: String): [SolarSystem!] }
-      |"""
-
   // Each source's type records what its resolvers produce and decode, so `torpor` below can check, when this
   // compiles, that every keyed field can read its key from whatever another source produces for its parent.
 
   /** Owns `Character`: both roots produce `Character` values as `EsiCharacter`. */
   def charactersSource(api: EsiApi[IO]) =
-    Source[IO]("characters", characters.text)(
+    Source[IO]("characters", characters)(
       resolver.root[IO](characters.Query.character) { args =>
         (args.id, args.name) match {
           case (Some(id), None)   => api.characters(NonEmptyList.one(id)).map(_.get(id))
@@ -79,11 +60,21 @@ object EsiGraphQL {
       }
     )
 
+  val universe =
+    schema"""type Corporation { id: ID! name: String! ticker: String! }
+      |type Alliance { id: ID! name: String! ticker: String! }
+      |type Region { id: ID! name: String! }
+      |extend type Character { corporation: Corporation! }
+      |extend type Corporation { alliance: Alliance }
+      |extend type SolarSystem { constellation: Constellation! }
+      |extend type Constellation { region: Region! }
+      |"""
+
   /** Hydrates `Character.corporation` from each character's `corporationId`, `Corporation.alliance` likewise, and the
     * route's systems down to their region.
     */
   def universeSource(api: EsiApi[IO]) =
-    Source[IO]("universe", universe.text)(
+    Source[IO]("universe", universe)(
       // one call per level: every selected character's corporation comes from a single request
       resolver
         .field[IO](universe.Character.corporation)
@@ -106,9 +97,18 @@ object EsiGraphQL {
         .batch((ids: NonEmptyList[Long]) => api.names(ids).map(_.map { case (id, name) => id -> EsiRegion(id, name) }))
     )
 
+  // the route is one ESI call that returns N system ids: the fan-out the planner exists for, and the only query here
+  // that is several levels deep. The two types it returns are defined here; the fields that hydrate them are extensions
+  // in `universe`, which is what makes them plan nodes rather than inline reads.
+  val routes =
+    schema"""type SolarSystem { id: ID! name: String! }
+      |type Constellation { id: ID! name: String! }
+      |extend type Query { route(origin: ID!, destination: ID!, flag: String): [SolarSystem!] }
+      |"""
+
   /** Owns the route lookup: the root produces `SolarSystem` values as `EsiSolarSystem`. */
   def routesSource(api: EsiApi[IO]) =
-    Source[IO]("routes", routes.text)(
+    Source[IO]("routes", routes)(
       // the route ids are the root's own fan-out: ESI computes the route, then each system is its own request
       resolver.root[IO](routes.Query.route) { args =>
         api.route(args.origin, args.destination, args.flag).flatMap {

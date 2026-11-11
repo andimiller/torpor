@@ -52,8 +52,8 @@ private[source] object LinkCheck {
 
     val facts = elements(TypeRepr.of[Sources]).flatMap { pair =>
       elements(pair) match {
-        case List(id, sourceFacts) => elements(sourceFacts).map(fact => literal(id) -> fact)
-        case other                 => report.errorAndAbort(s"expected an (id, facts) pair, found ${pair.show}")
+        case List(id, _, sourceFacts) => elements(sourceFacts).map(fact => literal(id) -> fact)
+        case other                    => report.errorAndAbort(s"expected an (id, required, facts) triple, found ${pair.show}")
       }
     }
 

@@ -1,6 +1,6 @@
 package net.andimiller.torpor.macros
 
-import net.andimiller.torpor.core.{Arguments, FieldCoordinate}
+import net.andimiller.torpor.core.{Arguments, FieldCoordinate, Sdl}
 import net.andimiller.torpor.schema.{Schema, SchemaFingerprint, SdlFragment}
 
 class SchemaMacroSuite extends munit.FunSuite {
@@ -30,6 +30,16 @@ class SchemaMacroSuite extends munit.FunSuite {
   test("a type or field the SDL lacks is a compile error") {
     assert(compileErrors("shop.Character.nope").contains("nope"), compileErrors("shop.Character.nope"))
     assert(compileErrors("shop.Charactr.id").contains("Charactr"), compileErrors("shop.Charactr.id"))
+  }
+
+  test("the type lists the fields a source must resolve: extension fields and root fields") {
+    val pets = schema"""type Pet { id: ID! name: String! }
+                       |type Query { pets: [Pet!]! }
+                       |extend type Owner { pets: [Pet!]! }
+                       |"""
+    // `Pet.id` and `Pet.name` are read off whatever produced the pet, so they need no resolver
+    summon[pets.type <:< Sdl[("Owner.pets", "Query.pets")]]
+    summon[shop.type <:< Sdl["Query.character" *: EmptyTuple]]
   }
 
   test("the text merges, which is what a golden test needs") {

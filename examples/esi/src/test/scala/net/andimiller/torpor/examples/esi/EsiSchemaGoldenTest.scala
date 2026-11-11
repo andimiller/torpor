@@ -10,7 +10,7 @@ import net.andimiller.torpor.testkit.GoldenGraphqlsTest
   */
 final class EsiSchemaGoldenTest extends GoldenGraphqlsTest {
 
-  def schemas: List[Sdl] = List(EsiGraphQL.characters, EsiGraphQL.universe, EsiGraphQL.routes)
+  def schemas: List[Sdl[?]] = List(EsiGraphQL.characters, EsiGraphQL.universe, EsiGraphQL.routes)
 
   override def golden = Paths.get("examples/esi/src/test/resources/full.graphqls")
 }

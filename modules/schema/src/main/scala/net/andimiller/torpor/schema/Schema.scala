@@ -45,6 +45,18 @@ object Schema {
   def declarations(fragment: SdlFragment): Either[NonEmptyChain[SchemaError], List[TypeDef]] =
     SangriaBridge.parse(fragment).map(parsed => parsed.types ++ parsed.extensions.map(_.tpe))
 
+  /** The fields a fragment's source must resolve, as `Type.field`: every field it adds with `extend type`, and every
+    * field of a root type it declares. The `schema` macro records these in the SDL's type, so assembling sources can
+    * check them when the code compiles; startup applies the same rule to the merged schema.
+    */
+  def required(fragment: SdlFragment): Either[NonEmptyChain[SchemaError], List[String]] =
+    SangriaBridge.parse(fragment).map { parsed =>
+      val roots      = parsed.roots.map(_.tpe).toSet ++ conventionalRoots
+      val extended   = parsed.extensions.map(_.tpe)
+      val rootFields = (parsed.types ++ extended).filter(tpe => roots(tpe.name))
+      (extended ++ rootFields).flatMap(tpe => tpe.fields.map(field => s"${tpe.name}.${field.name}")).distinct.sorted
+    }
+
   def merge(fragments: List[SdlFragment]): Either[NonEmptyChain[SchemaError], Schema] = {
     val results     = fragments.map(SangriaBridge.parse)
     val parseErrors = results.collect { case Left(errs) => errs.toChain.toVector }.flatten

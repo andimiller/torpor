@@ -31,7 +31,7 @@ curl -s localhost:8080/graphql -H 'content-type: application/json' \
 | | torpor | Caliban |
 |---|---|---|
 | schema | SDL strings per source, merged; `checkCoverage` proves every field has a resolver | derived from case classes; a missing type is a compile error |
-| unknown field | a resolver for a field the SDL lacks does not compile; a field with no resolver is caught at startup by the coverage check | caught at compile time |
+| unknown field | a resolver for a field the SDL lacks does not compile, and neither does an SDL field with no resolver | caught at compile time |
 | links between sources | checked at compile time: a keyed field's parent type must have the fields it reads, in every source that produces it | one schema, so there are no links to check |
 | arguments | typed from the SDL (`args.id: Option[Long]` via `given Scalar["ID", Long]()`), no class to write | a case class per field (`CharacterArgs`, `CharacterIds`) deriving `ArgBuilder` |
 | laziness | a field becomes a plan node only when the client selects it | field is a `UIO`, so it runs only when selected |
@@ -82,5 +82,4 @@ the alliance endpoint get called?" you read the same line.
 
 Torpor: the schema is text, the resolvers are functions in a table, and the ESI wire types stay pure
 data. The contract can be read, reviewed and handed to a client team without reading any Scala. The
-price is two artifacts that can drift — which is what `checkCoverage` is for, at startup rather than
-at compile time.
+price is two artifacts that can drift, which the coverage check catches when the code compiles.

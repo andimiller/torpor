@@ -11,7 +11,7 @@ final class TorporHttpSuite extends munit.CatsEffectSuite {
 
   private val sdl = schema"""extend type Query { hello(name: String): String }"""
 
-  private val source = Source[IO]("greetings", sdl.text)(
+  private val source = Source[IO]("greetings", sdl)(
     resolver.root[IO](sdl.Query.hello) { args =>
       IO(s"hello ${args.name.getOrElse("world")}")
     }

@@ -15,11 +15,11 @@ object LinkedPets {
                        |extend type Pet { owner: Owner! }
                        |"""
 
-  val petsSource = Source[IO]("pets", pets.text)(
+  val petsSource = Source[IO]("pets", pets)(
     resolver.root[IO](pets.Query.pet) { args => IO.pure(Option(LinkedPet(args.id, "Rex", "o1"))) }
   )
 
-  def ownersSource = Source[IO]("owners", owners.text)(
+  def ownersSource = Source[IO]("owners", owners)(
     resolver
       .field[IO](owners.Pet.owner)
       .key((pet: LinkedPet) => pet.ownerId)
@@ -55,7 +55,7 @@ final class LinkCheckSuite extends munit.CatsEffectSuite {
 
   test("a consumer that decodes a narrower parent still links") {
     // a single resolver needs no tuple
-    val narrow = Source[IO]("owners", owners.text)(
+    val narrow = Source[IO]("owners", owners)(
       resolver
         .field[IO](owners.Pet.owner)
         .key((parent: HasOwner) => parent.ownerId)
@@ -67,7 +67,7 @@ final class LinkCheckSuite extends munit.CatsEffectSuite {
 
   test("a producer without the field a consumer reads does not compile") {
     val errors = compileErrors("""
-      val summaries = Source[IO]("pets", pets.text)(
+      val summaries = Source[IO]("pets", pets)(
         resolver.root[IO](pets.Query.pet) { args => IO.pure(Option(PetSummary(args.id, "Rex"))) }
       )
       Torpor[IO](summaries, ownersSource)
@@ -83,7 +83,7 @@ final class LinkCheckSuite extends munit.CatsEffectSuite {
 
   test("a producer whose field has another type does not compile") {
     val errors = compileErrors("""
-      val numeric = Source[IO]("pets", pets.text)(
+      val numeric = Source[IO]("pets", pets)(
         resolver.root[IO](pets.Query.pet) { args => IO.pure(Option(PetWithNumericOwner(args.id, "Rex", 1L))) }
       )
       Torpor[IO](numeric, ownersSource)
@@ -92,8 +92,13 @@ final class LinkCheckSuite extends munit.CatsEffectSuite {
   }
 
   test("something that is not a resolver does not compile") {
-    val errors = compileErrors("""Source[IO]("owners", owners.text)("not a resolver", 1)""")
+    val errors = compileErrors("""Source[IO]("owners", owners)("not a resolver", 1)""")
     assert(errors.contains("Match type reduction failed"), errors)
+  }
+
+  test("a source with a resolver missing does not compile") {
+    val errors = compileErrors("""Torpor[IO](petsSource, Source[IO]("owners", owners))""")
+    assert(errors.contains("source 'owners' has no resolver for Pet.owner"), errors)
   }
 
   test("a source takes its resolvers once") {

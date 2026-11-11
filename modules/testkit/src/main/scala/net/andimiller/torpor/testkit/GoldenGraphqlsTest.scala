@@ -19,7 +19,7 @@ import net.andimiller.torpor.schema.{Schema, SdlFragment}
 abstract class GoldenGraphqlsTest extends munit.FunSuite {
 
   /** The `schema"""…"""` values, in any order: they are merged before rendering, exactly as at startup. */
-  def schemas: List[Sdl]
+  def schemas: List[Sdl[?]]
 
   /** Where the merged contract is kept, relative to the working directory: under sbt, the build root. */
   def golden: Path = Paths.get("src/test/resources/schema.graphqls")

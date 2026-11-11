@@ -6,9 +6,9 @@ import scala.quoted.*
 
 /** `sdl"""…"""`, parsed and checked when the code compiles instead of when the server starts.
   *
-  * It produces a plain `String`, so it is a drop-in for a bare triple-quoted literal, such as a source that only
-  * declares types: `Source[IO](id, sdl"""…""")`. Resolvers need coordinates, which `schema"""…"""` provides. Runtime
-  * and compile time run the same checks (`Schema.check`), so nothing is accepted here that startup would reject.
+  * It produces a plain `String`, so it is a drop-in for a bare triple-quoted literal. A `Source` needs `schema"""…"""`
+  * instead, which also records the fragment's coordinates and the fields it requires resolved. Runtime and compile time
+  * run the same checks (`Schema.check`), so nothing is accepted here that startup would reject.
   */
 object SdlMacro {
 

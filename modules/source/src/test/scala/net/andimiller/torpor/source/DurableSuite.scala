@@ -34,7 +34,7 @@ final class DurableSuite extends munit.FunSuite {
 
   private def torpor(calls: Calls): Torpor[IO] =
     Torpor[IO](
-      Source[IO]("pets", petsSdl.text)(
+      Source[IO]("pets", petsSdl)(
         resolver.root[IO](petsSdl.Query.pets) { _ =>
           IO {
             calls.pets.incrementAndGet()
@@ -42,7 +42,7 @@ final class DurableSuite extends munit.FunSuite {
           }
         }
       ),
-      Source[IO]("reports", reportsSdl.text)(
+      Source[IO]("reports", reportsSdl)(
         resolver.suspending[IO](reportsSdl.Query.adoptionReport) { args =>
           IO(Step.suspend(s"job-${args.species}"))
         } { (handle: String, payload: Json) =>

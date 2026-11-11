@@ -21,7 +21,7 @@ import scala.quoted.*
   */
 object SchemaMacro {
 
-  def impl(sc: Expr[StringContext], args: Expr[Seq[Any]])(using Quotes): Expr[Sdl] = {
+  def impl(sc: Expr[StringContext], args: Expr[Seq[Any]])(using Quotes): Expr[Sdl[?]] = {
     import quotes.reflect.*
 
     args match {
@@ -125,20 +125,27 @@ object SchemaMacro {
     // stripMargin here so the `|` layout works without a trailing call
     val text = parts.mkString.stripMargin
 
-    Schema.declarations(SdlFragment("<schema>", text)) match {
-      case Left(errors)    => report.errorAndAbort(errors.toChain.toList.map(_.render).mkString("\n"))
-      case Right(declared) =>
-        val objectTypes = declared.filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
-        val fields      = objectTypes
+    val fragment = SdlFragment("<schema>", text)
+    Schema.declarations(fragment).flatMap(declared => Schema.required(fragment).map(declared -> _)) match {
+      case Left(errors)                => report.errorAndAbort(errors.toChain.toList.map(_.render).mkString("\n"))
+      case Right((declared, required)) =>
+        val objectTypes   = declared.filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
+        val fields        = objectTypes
           .flatMap(tpe =>
             tpe.fields.map(field => (tpe.name, field.name, argumentsType(declared, field.args), field.tpe.named))
           )
           .distinctBy { case (parent, field, _, _) => (parent, field) }
           .sortBy { case (parent, field, _, _) => s"$parent.$field" }
 
-        // Sdl { val Query: Sdl.TypeFields { val character: FieldCoordinate.Of["Query", "character", …] } … }
-        val refined     =
-          fields.groupBy(_._1).toList.sortBy(_._1).foldLeft(TypeRepr.of[Sdl]) { case (sdl, (parent, typeFields)) =>
+        // ("Character.corporation", "Query.character", …)
+        val requiredTuple = tuple(required.map(literal))
+
+        // Sdl[Required] { val Query: Sdl.TypeFields { val character: FieldCoordinate.Of["Query", "character", …] } … }
+        val refined = fields
+          .groupBy(_._1)
+          .toList
+          .sortBy(_._1)
+          .foldLeft(TypeRepr.of[Sdl].appliedTo(requiredTuple)) { case (sdl, (parent, typeFields)) =>
             val members = typeFields.foldLeft(TypeRepr.of[Sdl.TypeFields]) { case (inner, (_, field, args, returns)) =>
               Refinement(
                 inner,
@@ -151,8 +158,9 @@ object SchemaMacro {
             Refinement(sdl, parent, members)
           }
 
+        // `refined` is `Sdl[Required]` plus its members; the type argument is erased at runtime
         refined.asType match {
-          case '[r] => '{ new Sdl(${ Expr(text) }).asInstanceOf[r & Sdl] }
+          case '[r] => '{ new Sdl[EmptyTuple](${ Expr(text) }).asInstanceOf[r & Sdl[?]] }
         }
     }
   }

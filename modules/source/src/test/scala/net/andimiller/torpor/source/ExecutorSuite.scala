@@ -63,7 +63,7 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
   private final class Fixture(ownersFail: Boolean = false, omitOwner: Option[OwnerId] = None) {
     val calls = new Calls
 
-    private val petsSource = Source[IO]("pets", petsSdl.text)(
+    private val petsSource = Source[IO]("pets", petsSdl)(
       resolver.root[IO](petsSdl.Query.pets) { args =>
         IO {
           calls.pets.incrementAndGet()
@@ -72,7 +72,7 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
       }
     )
 
-    private val ownersSource = Source[IO]("owners", ownersSdl.text)(
+    private val ownersSource = Source[IO]("owners", ownersSdl)(
       resolver
         .field[IO](ownersSdl.Pet.owner)
         .key((pet: Pet) => pet.ownerId)
@@ -90,7 +90,7 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
     )
 
     // `Species` is declared by the pets source, so this fragment cannot type the argument: decode it as a class
-    private val reportsSource = Source[IO]("reports", reportsSdl.text)(
+    private val reportsSource = Source[IO]("reports", reportsSdl)(
       resolver.root[IO](reportsSdl.Query.adoptionReport).args[ReportArgs] { args =>
         IO {
           calls.reports.incrementAndGet()
