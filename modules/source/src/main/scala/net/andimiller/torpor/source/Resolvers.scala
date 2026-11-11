@@ -4,7 +4,7 @@ import cats.{Applicative, Functor}
 import cats.data.NonEmptyList
 import cats.syntax.all._
 import io.circe.{Decoder, Encoder, Json, parser}
-import net.andimiller.torpor.core.{Argument, FieldCoordinate, InvalidInputException, Resolver, Step}
+import net.andimiller.torpor.core.{Argument, Arguments, FieldCoordinate, InvalidInputException, Resolver, Step}
 
 /** A source: an SDL fragment plus the resolvers that serve it. */
 final case class Source[F[_]](id: String, sdl: String, resolvers: Resolvers[F])
@@ -22,9 +22,39 @@ object Resolvers {
 /** `"Pet" / "owner"` reads better than `FieldCoordinate("Pet", "owner")` at call sites. */
 extension (typeName: String) def /(fieldName: String): FieldCoordinate = FieldCoordinate(typeName, fieldName)
 
+// wiring code imports `source.*`; these are what it declares and reads
+export net.andimiller.torpor.core.{Arguments, Scalar}
+
 object resolver {
 
-  def root[F[_]](coordinate: FieldCoordinate): RootBuilder[F] = new RootBuilder[F](coordinate)
+  /** A root field. With a coordinate from the schema macro, the lambda's `args` is typed from the SDL's arguments:
+    * `resolver.root[IO](sdl.Query.character) { args => args.id … }`; `.args[A]` decodes them as `A` instead. With a
+    * plain `FieldCoordinate`, the lambda names its argument type.
+    */
+  def root[F[_]]: RootStart[F] = new RootStart[F]
+
+  final class RootStart[F[_]] {
+    def apply[T <: String, N <: String, A](coordinate: FieldCoordinate.Of[T, N, A]): TypedRoot[F, A] =
+      new TypedRoot[F, A](coordinate)
+
+    def apply(coordinate: FieldCoordinate): RootBuilder[F] = new RootBuilder[F](coordinate)
+  }
+
+  /** A root field whose arguments type `A` the SDL decided. */
+  final class TypedRoot[F[_], A](coordinate: FieldCoordinate) {
+    inline def apply[B](
+        run: A => F[B]
+    )(using functor: Functor[F], encoder: Encoder[B]): (FieldCoordinate, Resolver[F]) =
+      new RootBuilder[F](coordinate).apply[A, B](run)(using functor, Arguments.decoder[A], encoder)
+
+    /** Decode the arguments as `A2` instead, such as a case class with domain types the SDL cannot express. */
+    def args[A2]: ArgsRoot[F, A2] = new ArgsRoot[F, A2](coordinate)
+  }
+
+  final class ArgsRoot[F[_], A](coordinate: FieldCoordinate) {
+    def apply[B](run: A => F[B])(using Functor[F], Decoder[A], Encoder[B]): (FieldCoordinate, Resolver[F]) =
+      new RootBuilder[F](coordinate).apply[A, B](run)
+  }
 
   /** A root field that may park the run. The handle is encoded into the snapshot and decoded back on resume; the
     * webhook payload stays raw JSON, because it arrives from outside.

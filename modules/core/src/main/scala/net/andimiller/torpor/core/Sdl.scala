@@ -4,7 +4,7 @@ package net.andimiller.torpor.core
   *
   * The macro refines the value with one member per type, each with one member per field, so `sdl.Query.character`
   * compiles only if the SDL declares `Query.character`, and an editor can complete it. The member's type names the
-  * coordinate's parent type and field.
+  * coordinate's parent type and field, and carries the field's arguments, which is what types a root resolver's `args`.
   */
 final class Sdl(val text: String) extends Selectable {
 

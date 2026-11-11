@@ -72,10 +72,11 @@ final case class FieldCoordinate(parentType: String, field: String) {
 
 object FieldCoordinate {
 
-  /** A coordinate whose type names its parent type and its field, as the schema macro emits them. It is a plain
-    * `FieldCoordinate` at runtime; the type exists so the compiler can check things by coordinate.
+  /** A coordinate whose type names its parent type, its field and the field's arguments, as the schema macro emits
+    * them. It is a plain `FieldCoordinate` at runtime; the type exists so the compiler can look things up by parent
+    * type and type a root resolver's arguments.
     */
-  opaque type Of[Parent <: String, Field <: String] <: FieldCoordinate = FieldCoordinate
+  opaque type Of[Parent <: String, Field <: String, Args] <: FieldCoordinate = FieldCoordinate
 }
 
 final case class Argument(name: String, value: Value)

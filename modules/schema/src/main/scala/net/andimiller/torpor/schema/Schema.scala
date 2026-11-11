@@ -39,8 +39,8 @@ object Schema {
       case Right(_)     => Nil
     }
 
-  /** Every type a fragment defines or extends, validated, as written in that fragment alone. The `schema` macro reads
-    * its coordinates from this.
+  /** Every type a fragment defines or extends, validated, as written in that fragment alone. The `schema` macro types
+    * field arguments from this, so it only sees enums, input objects and scalars the same fragment declares.
     */
   def declarations(fragment: SdlFragment): Either[NonEmptyChain[SchemaError], List[TypeDef]] =
     SangriaBridge.parse(fragment).map(parsed => parsed.types ++ parsed.extensions.map(_.tpe))

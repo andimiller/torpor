@@ -4,7 +4,6 @@ import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all._
 import com.comcast.ip4s.*
-import io.circe.Decoder
 import net.andimiller.torpor.examples.esi.client.*
 import net.andimiller.torpor.http.TorporHttp
 import net.andimiller.torpor.macros.schema
@@ -14,10 +13,6 @@ import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.Router
 
-final case class CharacterArgs(id: Option[Long], name: Option[String]) derives Decoder
-final case class CharacterIds(ids: List[Long]) derives Decoder
-final case class RouteArgs(origin: Long, destination: Long, flag: Option[String]) derives Decoder
-
 /** The whole GraphQL side: three sources, which is all the "optional hydration" and the fan-out need.
   *
   *   - `characters` owns `Character` and the root lookup
@@ -26,6 +21,9 @@ final case class RouteArgs(origin: Long, destination: Long, flag: Option[String]
   *   - `routes` owns the route lookup and the two types it returns
   */
 object EsiGraphQL {
+
+  // ESI ids are numbers, so every `ID` argument decodes as a Long; the macro reads this where the SDL is written
+  given Scalar["ID", Long]()
 
   val characters =
     schema"""type Character { id: ID! name: String! }
@@ -59,7 +57,7 @@ object EsiGraphQL {
       "characters",
       characters.text,
       Resolvers[IO](
-        resolver.root[IO](characters.Query.character) { (args: CharacterArgs) =>
+        resolver.root[IO](characters.Query.character) { args =>
           (args.id, args.name) match {
             case (Some(id), None)   => api.characters(NonEmptyList.one(id)).map(_.get(id))
             case (None, Some(name)) =>
@@ -72,7 +70,7 @@ object EsiGraphQL {
           }
         },
         // one characters call, however many ids: the corporation node below then batches too
-        resolver.root[IO](characters.Query.characters) { (args: CharacterIds) =>
+        resolver.root[IO](characters.Query.characters) { args =>
           NonEmptyList.fromList(args.ids) match {
             case None      => IO.pure(Nil)
             case Some(ids) => api.characters(ids).map(byId => args.ids.flatMap(byId.get))
@@ -115,7 +113,7 @@ object EsiGraphQL {
       routes.text,
       Resolvers[IO](
         // the route ids are the root's own fan-out: ESI computes the route, then each system is its own request
-        resolver.root[IO](routes.Query.route) { (args: RouteArgs) =>
+        resolver.root[IO](routes.Query.route) { args =>
           api.route(args.origin, args.destination, args.flag).flatMap {
             case None      => IO.pure(Option.empty[List[EsiSolarSystem]])
             case Some(ids) =>

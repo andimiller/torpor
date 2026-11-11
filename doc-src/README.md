@@ -12,17 +12,14 @@ Built on cats-effect and [hedgehogs](https://github.com/andimiller/hedgehogs).
 import cats.data.NonEmptyList
 import cats.effect.IO
 import com.comcast.ip4s.*
-import io.circe.Decoder
 import net.andimiller.torpor.examples.esi.client.*
 import net.andimiller.torpor.http.TorporHttp
 import net.andimiller.torpor.macros.schema
 import net.andimiller.torpor.source.*
 import org.http4s.ember.server.EmberServerBuilder
 
-// 1. Write your types and interfaces like you usually would.
-//    `CharacterArgs` is what clients can send; `EsiApi` is the client from examples/shared-esi. Your domain types
-//    know nothing about GraphQL: no effect fields, no schema annotations.
-final case class CharacterArgs(id: Option[Long], name: Option[String]) derives Decoder
+// 1. Write your types and interfaces like you usually would. `EsiApi` is the client from examples/shared-esi. Your
+//    domain types know nothing about GraphQL: no effect fields, no schema annotations.
 
 val esi: EsiApi[IO] = new EsiApi[IO] {
   def characterIdByName(name: String): IO[Option[Long]]                    = IO.pure(None)
@@ -36,19 +33,24 @@ val esi: EsiApi[IO] = new EsiApi[IO] {
   def names(ids: NonEmptyList[Long]): IO[Map[Long, String]]                                                       = IO.pure(Map.empty)
 }
 
-// 2. Define your GraphQL schemas, as SDL, per source. Both are parsed and validated when this compiles, and each
+// 2. Say which Scala type a GraphQL scalar's arguments decode to. This lives in the wiring, not on the domain types:
+//    ESI ids are numbers, so `ID` arguments decode as `Long`.
+given Scalar["ID", Long]()
+
+// 3. Define your GraphQL schemas, as SDL, per source. Both are parsed and validated when this compiles, and each
 //    gives you the text to merge plus its field coordinates as members: `universe.Character.corporation` compiles
-//    only if that SDL declares the field.
+//    only if that SDL declares the field, and `characters.Query.character` carries that field's arguments' types.
 val characters = schema"""type Character { id: ID! name: String! }
   |extend type Query { character(id: ID, name: String): Character }"""
 
 val universe = schema"""type Corporation { id: ID! name: String! }
   |extend type Character { corporation: Corporation! }"""
 
-// 3. Wire up resolution: a root field takes typed arguments, a hydrated field takes a batch of keys. Hydration only
-//    runs when the client selects it, and then once for the whole set.
+// 4. Wire up resolution: a root field's `args` are typed from its SDL arguments (`args.id: Option[Long]`), and a
+//    hydrated field takes a batch of keys. Hydration only runs when the client selects it, and then once for the
+//    whole set.
 val charactersSource = Source[IO]("characters", characters.text, Resolvers[IO](
-  resolver.root[IO](characters.Query.character) { (args: CharacterArgs) =>
+  resolver.root[IO](characters.Query.character) { args =>
     args.id match {
       case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
       case None     =>
@@ -70,7 +72,7 @@ val universeSource = Source[IO]("universe", universe.text, Resolvers[IO](
 //    problem. Running it is what makes the schema servable.
 val started: IO[(Torpor[IO], net.andimiller.torpor.schema.Schema)] = Torpor[IO](charactersSource, universeSource).startup
 
-// 4. Mount into a server: one http4s route, the same one for every schema.
+// 5. Mount into a server: one http4s route, the same one for every schema.
 val server = started.flatMap { case (torpor, schema) =>
   EmberServerBuilder
     .default[IO]
@@ -115,7 +117,7 @@ Works today:
 | | |
 |---|---|
 | SDL | per-source fragments, `extend` across sources, merge with typed errors carrying `source:line:column` |
-| Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile) and `sdl"""…"""` (text only) |
+| Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile; root resolver arguments typed from the SDL) and `sdl"""…"""` (text only) |
 | Validation | a documented subset of the spec's rules; unsupported constructs fail loudly |
 | Planner | query → DAG of batch calls, normalised selection sets, variables substituted to literals |
 | Executor | one call per node per level, errors as values with response paths, alias-keyed assembly |

@@ -1,6 +1,6 @@
 package net.andimiller.torpor.macros
 
-import net.andimiller.torpor.core.FieldCoordinate
+import net.andimiller.torpor.core.{Arguments, FieldCoordinate}
 import net.andimiller.torpor.schema.{Schema, SchemaFingerprint, SdlFragment}
 
 class SchemaMacroSuite extends munit.FunSuite {
@@ -22,7 +22,7 @@ class SchemaMacroSuite extends munit.FunSuite {
   }
 
   test("a member's type names its parent type and field") {
-    val typed: FieldCoordinate.Of["Character", "corporation"] = shop.Character.corporation
+    val typed: FieldCoordinate.Of["Character", "corporation", Arguments[EmptyTuple]] = shop.Character.corporation
     assertEquals(typed, FieldCoordinate("Character", "corporation"))
   }
 

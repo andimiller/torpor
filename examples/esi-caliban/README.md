@@ -31,7 +31,8 @@ curl -s localhost:8080/graphql -H 'content-type: application/json' \
 | | torpor | Caliban |
 |---|---|---|
 | schema | SDL strings per source, merged; `checkCoverage` proves every field has a resolver | derived from case classes; a missing type is a compile error |
-| unknown field | caught at startup by the coverage check | caught at compile time |
+| unknown field | a resolver for a field the SDL lacks does not compile; a field with no resolver is caught at startup by the coverage check | caught at compile time |
+| arguments | typed from the SDL (`args.id: Option[Long]` via `given Scalar["ID", Long]()`), no class to write | a case class per field (`CharacterArgs`, `CharacterIds`) deriving `ArgBuilder` |
 | laziness | a field becomes a plan node only when the client selects it | field is a `UIO`, so it runs only when selected |
 | batching | one ESI call per level, however many rows | one call per row: 3 characters means 3 corporation calls |
 | where the schema lives | SDL strings; resolvers are looked up by field coordinate | derived from case classes that also carry the resolvers |
