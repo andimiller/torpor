@@ -49,7 +49,7 @@ val universe = schema"""type Corporation { id: ID! name: String! }
 // 4. Wire up resolution: a root field's `args` are typed from its SDL arguments (`args.id: Option[Long]`), and a
 //    hydrated field takes a batch of keys. Hydration only runs when the client selects it, and then once for the
 //    whole set.
-val charactersSource = Source[IO]("characters", characters.text, Resolvers[IO](
+val charactersSource = Source[IO]("characters", characters.text)(
   resolver.root[IO](characters.Query.character) { args =>
     args.id match {
       case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
@@ -60,19 +60,22 @@ val charactersSource = Source[IO]("characters", characters.text, Resolvers[IO](
         }
     }
   }
-))
+)
 
-val universeSource = Source[IO]("universe", universe.text, Resolvers[IO](
+val universeSource = Source[IO]("universe", universe.text)(
   resolver.field[IO](universe.Character.corporation)
     .key((character: EsiCharacter) => character.corporationId)
     .batch((ids: NonEmptyList[Long]) => esi.corporations(ids))
-))
+)
 
+// 5. Assemble. Each source's type records what its resolvers produce and decode, so this checks the link between
+//    them when it compiles: `Character.corporation` reads `corporationId` from each character, and `characters`
+//    produces characters as `EsiCharacter`, which has it.
 //    `startup` merges the fragments and checks that every SDL field is served, raising one exception listing every
 //    problem. Running it is what makes the schema servable.
 val started: IO[(Torpor[IO], net.andimiller.torpor.schema.Schema)] = Torpor[IO](charactersSource, universeSource).startup
 
-// 5. Mount into a server: one http4s route, the same one for every schema.
+// 6. Mount into a server: one http4s route, the same one for every schema.
 val server = started.flatMap { case (torpor, schema) =>
   EmberServerBuilder
     .default[IO]
@@ -117,7 +120,7 @@ Works today:
 | | |
 |---|---|
 | SDL | per-source fragments, `extend` across sources, merge with typed errors carrying `source:line:column` |
-| Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile; root resolver arguments typed from the SDL) and `sdl"""…"""` (text only) |
+| Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile; root resolver arguments typed from the SDL) and `sdl"""…"""` (text only); assembling sources checks that every keyed field's parent type has the fields it reads |
 | Validation | a documented subset of the spec's rules; unsupported constructs fail loudly |
 | Planner | query → DAG of batch calls, normalised selection sets, variables substituted to literals |
 | Executor | one call per node per level, errors as values with response paths, alias-keyed assembly |

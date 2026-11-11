@@ -52,84 +52,78 @@ object EsiGraphQL {
       |extend type Query { route(origin: ID!, destination: ID!, flag: String): [SolarSystem!] }
       |"""
 
-  def sources(api: EsiApi[IO]): List[Source[IO]] = {
-    val charactersSource = Source[IO](
-      "characters",
-      characters.text,
-      Resolvers[IO](
-        resolver.root[IO](characters.Query.character) { args =>
-          (args.id, args.name) match {
-            case (Some(id), None)   => api.characters(NonEmptyList.one(id)).map(_.get(id))
-            case (None, Some(name)) =>
-              api.characterIdByName(name).flatMap {
-                case None     => IO.pure(None)
-                case Some(id) => api.characters(NonEmptyList.one(id)).map(_.get(id))
-              }
-            case _                  =>
-              IO.raiseError(new IllegalArgumentException("give exactly one of 'id' or 'name'"))
-          }
-        },
-        // one characters call, however many ids: the corporation node below then batches too
-        resolver.root[IO](characters.Query.characters) { args =>
-          NonEmptyList.fromList(args.ids) match {
-            case None      => IO.pure(Nil)
-            case Some(ids) => api.characters(ids).map(byId => args.ids.flatMap(byId.get))
-          }
+  // Each source's type records what its resolvers produce and decode, so `torpor` below can check, when this
+  // compiles, that every keyed field can read its key from whatever another source produces for its parent.
+
+  /** Owns `Character`: both roots produce `Character` values as `EsiCharacter`. */
+  def charactersSource(api: EsiApi[IO]) =
+    Source[IO]("characters", characters.text)(
+      resolver.root[IO](characters.Query.character) { args =>
+        (args.id, args.name) match {
+          case (Some(id), None)   => api.characters(NonEmptyList.one(id)).map(_.get(id))
+          case (None, Some(name)) =>
+            api.characterIdByName(name).flatMap {
+              case None     => IO.pure(None)
+              case Some(id) => api.characters(NonEmptyList.one(id)).map(_.get(id))
+            }
+          case _                  =>
+            IO.raiseError(new IllegalArgumentException("give exactly one of 'id' or 'name'"))
         }
-      )
-    )
-
-    val universeSource = Source[IO](
-      "universe",
-      universe.text,
-      Resolvers[IO](
-        // one call per level: every selected character's corporation comes from a single request
-        resolver
-          .field[IO](universe.Character.corporation)
-          .key((character: EsiCharacter) => character.corporationId)
-          .batch((ids: NonEmptyList[Long]) => api.corporations(ids)),
-        // ESI gives a corporation zero or one alliance: an optional key resolves to null, never to an error
-        resolver
-          .optionalField[IO](universe.Corporation.alliance)
-          .key((corporation: EsiCorporation) => corporation.allianceId)
-          .batch((ids: NonEmptyList[Long]) => api.alliances(ids)),
-        // one constellations call per level, however many systems are on the route
-        resolver
-          .field[IO](universe.SolarSystem.constellation)
-          .key((system: EsiSolarSystem) => system.constellationId)
-          .batch((ids: NonEmptyList[Long]) => api.constellations(ids)),
-        // names is a batch endpoint, so the last level collapses into one call for every region on the route
-        resolver
-          .field[IO](universe.Constellation.region)
-          .key((constellation: EsiConstellation) => constellation.regionId)
-          .batch((ids: NonEmptyList[Long]) =>
-            api.names(ids).map(_.map { case (id, name) => id -> EsiRegion(id, name) })
-          )
-      )
-    )
-
-    val routesSource = Source[IO](
-      "routes",
-      routes.text,
-      Resolvers[IO](
-        // the route ids are the root's own fan-out: ESI computes the route, then each system is its own request
-        resolver.root[IO](routes.Query.route) { args =>
-          api.route(args.origin, args.destination, args.flag).flatMap {
-            case None      => IO.pure(Option.empty[List[EsiSolarSystem]])
-            case Some(ids) =>
-              NonEmptyList.fromList(ids.distinct) match {
-                case None      => IO.pure(Option(List.empty[EsiSolarSystem]))
-                case Some(nel) => api.systems(nel).map(byId => Option(ids.flatMap(byId.get)))
-              }
-          }
+      },
+      // one characters call, however many ids: the corporation node below then batches too
+      resolver.root[IO](characters.Query.characters) { args =>
+        NonEmptyList.fromList(args.ids) match {
+          case None      => IO.pure(Nil)
+          case Some(ids) => api.characters(ids).map(byId => args.ids.flatMap(byId.get))
         }
-      )
+      }
     )
 
-    List(charactersSource, universeSource, routesSource)
-  }
+  /** Hydrates `Character.corporation` from each character's `corporationId`, `Corporation.alliance` likewise, and the
+    * route's systems down to their region.
+    */
+  def universeSource(api: EsiApi[IO]) =
+    Source[IO]("universe", universe.text)(
+      // one call per level: every selected character's corporation comes from a single request
+      resolver
+        .field[IO](universe.Character.corporation)
+        .key((character: EsiCharacter) => character.corporationId)
+        .batch((ids: NonEmptyList[Long]) => api.corporations(ids)),
+      // ESI gives a corporation zero or one alliance: an optional key resolves to null, never to an error
+      resolver
+        .optionalField[IO](universe.Corporation.alliance)
+        .key((corporation: EsiCorporation) => corporation.allianceId)
+        .batch((ids: NonEmptyList[Long]) => api.alliances(ids)),
+      // one constellations call per level, however many systems are on the route
+      resolver
+        .field[IO](universe.SolarSystem.constellation)
+        .key((system: EsiSolarSystem) => system.constellationId)
+        .batch((ids: NonEmptyList[Long]) => api.constellations(ids)),
+      // names is a batch endpoint, so the last level collapses into one call for every region on the route
+      resolver
+        .field[IO](universe.Constellation.region)
+        .key((constellation: EsiConstellation) => constellation.regionId)
+        .batch((ids: NonEmptyList[Long]) => api.names(ids).map(_.map { case (id, name) => id -> EsiRegion(id, name) }))
+    )
 
-  def torpor(api: EsiApi[IO]): Torpor[IO] = Torpor[IO](sources(api): _*)
+  /** Owns the route lookup: the root produces `SolarSystem` values as `EsiSolarSystem`. */
+  def routesSource(api: EsiApi[IO]) =
+    Source[IO]("routes", routes.text)(
+      // the route ids are the root's own fan-out: ESI computes the route, then each system is its own request
+      resolver.root[IO](routes.Query.route) { args =>
+        api.route(args.origin, args.destination, args.flag).flatMap {
+          case None      => IO.pure(Option.empty[List[EsiSolarSystem]])
+          case Some(ids) =>
+            NonEmptyList.fromList(ids.distinct) match {
+              case None      => IO.pure(Option(List.empty[EsiSolarSystem]))
+              case Some(nel) => api.systems(nel).map(byId => Option(ids.flatMap(byId.get)))
+            }
+        }
+      }
+    )
+
+  def torpor(api: EsiApi[IO]): Torpor[IO] =
+    Torpor[IO](universeSource(api), charactersSource(api), routesSource(api))
 
   def schema(api: EsiApi[IO]): Schema =
     torpor(api).schema.fold(

@@ -28,8 +28,12 @@ extend type Constellation { region: Region! }
 ```
 
 Each source's SDL is a `schema"""…"""` literal, so it is parsed and validated when this file compiles; the resolvers
-take their coordinates from the same value (`characters.Query.character`), and the text goes straight
-into `Source(...)`. Merged at startup, the whole schema is also what a golden test would compare.
+take their coordinates from the same value (`characters.Query.character`), and the text goes straight into
+`Source[IO]("characters", characters.text)(…)`. Merged at startup, the whole schema is also what a golden test would compare.
+
+Each source's type records what its resolvers produce and decode, so `Torpor[IO](charactersSource, universeSource, routesSource)`
+checks the links between them when it compiles: `Character.corporation` decodes each character as `EsiCharacter` to
+read `corporationId`, so a `characters` source producing a type without that field does not compile.
 
 Three sources: `characters` owns `Character` and the root lookup; `routes` owns the route lookup and the two types it
 returns; `universe` owns everything that hydrates them — `corporation`, `alliance`, `SolarSystem.constellation`,

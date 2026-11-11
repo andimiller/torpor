@@ -306,7 +306,8 @@ final class EsiSuite extends munit.CatsEffectSuite {
   test("source order does not matter: definitions merge before any extension is applied") {
     val esi      = fake()
     // `universe` extends types `characters` defines, but it is listed first here
-    val reversed = Torpor[IO](EsiGraphQL.sources(esi).reverse: _*)
+    val reversed =
+      Torpor[IO](EsiGraphQL.routesSource(esi), EsiGraphQL.universeSource(esi), EsiGraphQL.charactersSource(esi))
     val schema   = reversed.schema.fold(
       errors => fail(errors.toChain.toList.map(_.render).mkString("; ")),
       identity

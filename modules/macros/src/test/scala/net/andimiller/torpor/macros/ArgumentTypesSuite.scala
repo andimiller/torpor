@@ -50,18 +50,18 @@ class ArgumentTypesSuite extends munit.FunSuite {
     Arguments.decoder[PetsArgs].decodeJson(Json.obj(fields*)).left.map(_.getMessage)
 
   test("arguments are typed from the SDL: nullable, lists, enums, input objects, defaults, bound and unbound scalars") {
-    val typed: FieldCoordinate.Of["Query", "pets", PetsArgs] = BoundIds.pets.Query.pets
+    val typed: FieldCoordinate.Of["Query", "pets", PetsArgs, "Pet"] = BoundIds.pets.Query.pets
     assertEquals(typed, FieldCoordinate("Query", "pets"))
   }
 
   test("ID is a String when no Scalar binds it") {
-    val typed: FieldCoordinate.Of["Query", "pet", Arguments[("id", String) *: EmptyTuple] { val id: String }] =
+    val typed: FieldCoordinate.Of["Query", "pet", Arguments[("id", String) *: EmptyTuple] { val id: String }, "Pet"] =
       UnboundIds.pets.Query.pet
     assertEquals(typed, FieldCoordinate("Query", "pet"))
   }
 
   test("a field without arguments has an empty Arguments") {
-    val typed: FieldCoordinate.Of["Pet", "id", Arguments[EmptyTuple]] = BoundIds.pets.Pet.id
+    val typed: FieldCoordinate.Of["Pet", "id", Arguments[EmptyTuple], "ID"] = BoundIds.pets.Pet.id
     assertEquals(typed, FieldCoordinate("Pet", "id"))
   }
 

@@ -22,7 +22,8 @@ class SchemaMacroSuite extends munit.FunSuite {
   }
 
   test("a member's type names its parent type and field") {
-    val typed: FieldCoordinate.Of["Character", "corporation", Arguments[EmptyTuple]] = shop.Character.corporation
+    val typed: FieldCoordinate.Of["Character", "corporation", Arguments[EmptyTuple], "Corporation"] =
+      shop.Character.corporation
     assertEquals(typed, FieldCoordinate("Character", "corporation"))
   }
 

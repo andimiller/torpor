@@ -4,6 +4,7 @@ import cats.data.NonEmptyList
 import cats.effect.IO
 import io.circe.{Decoder, Encoder, Json}
 import net.andimiller.torpor.core.{FieldError, PathSegment, Plan, Response}
+import net.andimiller.torpor.macros.schema
 import net.andimiller.torpor.schema.Executable
 
 import java.util.concurrent.atomic.AtomicInteger
@@ -20,7 +21,6 @@ final case class Pet(id: String, name: String, species: String, ownerId: OwnerId
 
 final case class Owner(id: OwnerId, name: String, email: String) derives Encoder.AsObject, Decoder
 
-final case class PetsArgs(species: Option[String], first: Option[Int]) derives Decoder
 final case class ReportArgs(species: String) derives Decoder
 final case class AdoptionReport(species: String, adoptions: Int) derives Encoder.AsObject, Decoder
 
@@ -38,20 +38,20 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
   )
 
   private val petsSdl =
-    """enum Species { DOG CAT }
+    schema"""enum Species { DOG CAT }
       |type Pet { id: ID! name: String! species: Species! }
       |extend type Query { pets(species: Species, first: Int = 20): [Pet!]! }
-      |""".stripMargin
+      |"""
 
   private val ownersSdl =
-    """type Owner { id: ID! name: String! email: String! }
+    schema"""type Owner { id: ID! name: String! email: String! }
       |extend type Pet { owner: Owner! }
-      |""".stripMargin
+      |"""
 
   private val reportsSdl =
-    """type AdoptionReport { species: Species! adoptions: Int! }
+    schema"""type AdoptionReport { species: Species! adoptions: Int! }
       |extend type Query { adoptionReport(species: Species!): AdoptionReport! }
-      |""".stripMargin
+      |"""
 
   private final class Calls {
     val pets       = new AtomicInteger(0)
@@ -63,51 +63,40 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
   private final class Fixture(ownersFail: Boolean = false, omitOwner: Option[OwnerId] = None) {
     val calls = new Calls
 
-    private val petsSource = Source[IO](
-      "pets",
-      petsSdl,
-      Resolvers[IO](
-        resolver.root[IO]("Query" / "pets") { (args: PetsArgs) =>
-          IO {
-            calls.pets.incrementAndGet()
-            pets.filter(p => args.species.forall(_ == p.species)).take(args.first.getOrElse(20))
-          }
+    private val petsSource = Source[IO]("pets", petsSdl.text)(
+      resolver.root[IO](petsSdl.Query.pets) { args =>
+        IO {
+          calls.pets.incrementAndGet()
+          pets.filter(p => args.species.forall(_ == p.species)).take(args.first.getOrElse(20))
         }
-      )
+      }
     )
 
-    private val ownersSource = Source[IO](
-      "owners",
-      ownersSdl,
-      Resolvers[IO](
-        resolver
-          .field[IO]("Pet" / "owner")
-          .key((pet: Pet) => pet.ownerId)
-          .batch { (keys: NonEmptyList[OwnerId]) =>
-            IO {
-              calls.owners.incrementAndGet()
-              calls.ownersKeys.set(keys.size)
-              if (ownersFail) throw new RuntimeException("owners service unavailable")
-              owners
-                .filter(owner => keys.toList.contains(owner.id) && !omitOwner.contains(owner.id))
-                .map(owner => owner.id -> owner)
-                .toMap
-            }
-          }
-      )
-    )
-
-    private val reportsSource = Source[IO](
-      "reports",
-      reportsSdl,
-      Resolvers[IO](
-        resolver.root[IO]("Query" / "adoptionReport") { (args: ReportArgs) =>
+    private val ownersSource = Source[IO]("owners", ownersSdl.text)(
+      resolver
+        .field[IO](ownersSdl.Pet.owner)
+        .key((pet: Pet) => pet.ownerId)
+        .batch { (keys: NonEmptyList[OwnerId]) =>
           IO {
-            calls.reports.incrementAndGet()
-            AdoptionReport(args.species, 42)
+            calls.owners.incrementAndGet()
+            calls.ownersKeys.set(keys.size)
+            if (ownersFail) throw new RuntimeException("owners service unavailable")
+            owners
+              .filter(owner => keys.toList.contains(owner.id) && !omitOwner.contains(owner.id))
+              .map(owner => owner.id -> owner)
+              .toMap
           }
         }
-      )
+    )
+
+    // `Species` is declared by the pets source, so this fragment cannot type the argument: decode it as a class
+    private val reportsSource = Source[IO]("reports", reportsSdl.text)(
+      resolver.root[IO](reportsSdl.Query.adoptionReport).args[ReportArgs] { args =>
+        IO {
+          calls.reports.incrementAndGet()
+          AdoptionReport(args.species, 42)
+        }
+      }
     )
 
     val torpor = Torpor[IO](petsSource, ownersSource, reportsSource)

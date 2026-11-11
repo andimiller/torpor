@@ -41,13 +41,11 @@ enum QueryError                        {
   * The registry is built once. `checkCoverage` is the startup gate: it reports every SDL field that has no resolver and
   * every resolver that has no field, before any request arrives.
   */
-final class Torpor[F[_]: Concurrent](sources: List[Source[F]], limits: Planner.Limits = Planner.Limits.none) {
+final class Torpor[F[_]: Concurrent] private (sources: List[Source[F, ?, ?]], limits: Planner.Limits) {
 
   private val registry: Map[(String, FieldCoordinate), Resolver[F]] =
     sources
-      .flatMap(source =>
-        source.resolvers.entries.map { case (coordinate, resolver) => (source.id -> coordinate) -> resolver }
-      )
+      .flatMap(source => source.entries.map { case (coordinate, resolver) => (source.id -> coordinate) -> resolver })
       .toMap
 
   def withLimits(limits: Planner.Limits): Torpor[F] = new Torpor[F](sources, limits)
@@ -134,7 +132,37 @@ final class Torpor[F[_]: Concurrent](sources: List[Source[F]], limits: Planner.L
 }
 
 object Torpor {
-  def apply[F[_]: Concurrent](sources: Source[F]*): Torpor[F] = new Torpor[F](sources.toList)
+
+  /** One `(id, facts)` pair per source, which is what `LinkCheck` reads. */
+  type SourcesOf[Ss] <: Tuple = Ss match {
+    case Source[?, id, facts] => (id, facts) *: EmptyTuple
+    case EmptyTuple           => EmptyTuple
+    case s *: rest            => Tuple.Concat[SourcesOf[s], SourcesOf[rest]]
+  }
+
+  def apply[F[_]]: Start[F] = new Start[F]
+
+  // inline methods cannot call a private constructor, so they come through here
+  private def assemble[F[_]: Concurrent](sources: List[Source[F, ?, ?]]): Torpor[F] =
+    new Torpor[F](sources, Planner.Limits.none)
+
+  final class Start[F[_]] {
+
+    /** `Torpor[IO](charactersSource, universeSource)`, in any order. Does not compile if a keyed resolver decodes its
+      * parent as a type with a field that some producer of that parent type does not have.
+      */
+    inline def apply[Ss <: Matchable](sources: Ss)(using Concurrent[F]): Torpor[F] = {
+      LinkCheck.verify[SourcesOf[Ss]]
+      assemble[F](untyped(sources))
+    }
+
+    private def untyped(sources: Matchable): List[Source[F, ?, ?]] = sources match {
+      case source: Source[F, ?, ?] @unchecked => List(source)
+      case tuple: Tuple                       =>
+        tuple.productIterator.toList.flatMap(element => untyped(element.asInstanceOf[Matchable]))
+      case other                              => throw new IllegalArgumentException(s"not a source: $other")
+    }
+  }
 }
 
 object Variables {

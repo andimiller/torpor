@@ -64,7 +64,7 @@ lazy val testkit = (project in file("modules/testkit"))
   )
 
 lazy val source = (project in file("modules/source"))
-  .dependsOn(core, schema, snapshot)
+  .dependsOn(core, schema, snapshot, macros % Test)
   .settings(commonSettings)
   .settings(
     name := "torpor-source",
@@ -99,7 +99,7 @@ lazy val explain = (project in file("modules/explain"))
   )
 
 lazy val http = (project in file("modules/http"))
-  .dependsOn(core, schema, source)
+  .dependsOn(core, schema, source, macros % Test)
   .settings(commonSettings)
   .settings(
     name := "torpor-http",

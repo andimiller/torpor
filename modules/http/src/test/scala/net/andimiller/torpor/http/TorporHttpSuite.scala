@@ -1,27 +1,20 @@
 package net.andimiller.torpor.http
 
 import cats.effect.IO
-import io.circe.{Decoder, Json}
+import io.circe.Json
+import net.andimiller.torpor.macros.schema
 import net.andimiller.torpor.source.*
 import org.http4s.{EntityDecoder, Method, Request, Status, Uri}
 import org.http4s.circe._
 
-final case class HelloArgs(name: Option[String]) derives Decoder
-
 final class TorporHttpSuite extends munit.CatsEffectSuite {
 
-  private val sdl =
-    """extend type Query { hello(name: String): String }
-      |""".stripMargin
+  private val sdl = schema"""extend type Query { hello(name: String): String }"""
 
-  private val source = Source[IO](
-    "greetings",
-    sdl,
-    Resolvers[IO](
-      resolver.root[IO]("Query" / "hello") { (args: HelloArgs) =>
-        IO(s"hello ${args.name.getOrElse("world")}")
-      }
-    )
+  private val source = Source[IO]("greetings", sdl.text)(
+    resolver.root[IO](sdl.Query.hello) { args =>
+      IO(s"hello ${args.name.getOrElse("world")}")
+    }
   )
 
   private val torpor = Torpor[IO](source)

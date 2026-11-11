@@ -17,7 +17,7 @@ import scala.quoted.*
   *
   * The coordinates are carried in the result's type: a refinement adds one member per type with one member per field.
   * That makes an unknown coordinate a compile error at the call site, without a second macro there, and types each
-  * coordinate with the field's arguments.
+  * coordinate with the field's arguments and the GraphQL type it returns.
   */
 object SchemaMacro {
 
@@ -130,20 +130,22 @@ object SchemaMacro {
       case Right(declared) =>
         val objectTypes = declared.filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
         val fields      = objectTypes
-          .flatMap(tpe => tpe.fields.map(field => (tpe.name, field.name, argumentsType(declared, field.args))))
-          .distinctBy { case (parent, field, _) => (parent, field) }
-          .sortBy { case (parent, field, _) => s"$parent.$field" }
+          .flatMap(tpe =>
+            tpe.fields.map(field => (tpe.name, field.name, argumentsType(declared, field.args), field.tpe.named))
+          )
+          .distinctBy { case (parent, field, _, _) => (parent, field) }
+          .sortBy { case (parent, field, _, _) => s"$parent.$field" }
 
         // Sdl { val Query: Sdl.TypeFields { val character: FieldCoordinate.Of["Query", "character", …] } … }
         val refined     =
           fields.groupBy(_._1).toList.sortBy(_._1).foldLeft(TypeRepr.of[Sdl]) { case (sdl, (parent, typeFields)) =>
-            val members = typeFields.foldLeft(TypeRepr.of[Sdl.TypeFields]) { case (inner, (_, field, args)) =>
+            val members = typeFields.foldLeft(TypeRepr.of[Sdl.TypeFields]) { case (inner, (_, field, args, returns)) =>
               Refinement(
                 inner,
                 field,
                 TypeRepr
                   .of[FieldCoordinate.Of]
-                  .appliedTo(List(literal(parent), literal(field), args))
+                  .appliedTo(List(literal(parent), literal(field), args, literal(returns)))
               )
             }
             Refinement(sdl, parent, members)

@@ -3,73 +3,51 @@ package net.andimiller.torpor.source
 import cats.data.NonEmptyList
 import cats.effect.IO
 import io.circe.{Decoder, Encoder}
-import net.andimiller.torpor.core.{FieldCoordinate, Plan, Value}
-import net.andimiller.torpor.schema.{Executable, Schema, SdlFragment}
-
-import java.util.concurrent.atomic.AtomicInteger
+import net.andimiller.torpor.core.{Plan, Value}
+import net.andimiller.torpor.macros.schema
+import net.andimiller.torpor.schema.{Executable, Schema}
 
 final case class CoveragePet(id: String, ownerId: String) derives Decoder, Encoder.AsObject
-final case class CoverageArgs(first: Option[Int]) derives Decoder
 
 class LimitsAndCoverageSuite extends munit.FunSuite {
 
   private val petsSdl =
-    """type Pet { id: ID! name: String! }
+    schema"""type Pet { id: ID! name: String! }
       |extend type Query { pets(first: Int = 20): [Pet!]! }
-      |""".stripMargin
+      |"""
 
   private val ownersSdl =
-    """type Owner { id: ID! name: String! }
+    schema"""type Owner { id: ID! name: String! }
       |extend type Pet { owner: Owner! }
-      |""".stripMargin
+      |"""
 
   private val pet = CoveragePet("p1", "o1")
 
-  /** `serveOwners = false` leaves the extension field unserved, which is what the startup check must catch. */
-  private def sources(serveOwners: Boolean = true, serveUnused: Boolean = false): List[Source[IO]] = {
-    val pets = Source[IO](
-      "pets",
-      petsSdl,
-      Resolvers[IO](
-        resolver.root[IO]("Query" / "pets") { (args: CoverageArgs) => IO(List(pet)) }
-      )
-    )
+  private val pets = Source[IO]("pets", petsSdl.text)(resolver.root[IO](petsSdl.Query.pets) { _ => IO(List(pet)) })
 
-    val ownerResolvers =
-      if (serveOwners)
-        Resolvers[IO](
-          resolver
-            .field[IO]("Pet" / "owner")
-            .key((p: CoveragePet) => p.ownerId)
-            .batch((keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "Ada").toMap))
-        )
-      else Resolvers.empty[IO]
+  private val owners = Source[IO]("owners", ownersSdl.text)(
+    resolver
+      .field[IO](ownersSdl.Pet.owner)
+      .key((p: CoveragePet) => p.ownerId)
+      .batch((keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "Ada").toMap))
+  )
 
-    // `Pet.name` is declared in the type definition, so nothing should resolve it; registering one is a mistake.
-    val unused =
-      if (serveUnused)
-        Resolvers[IO](
-          resolver
-            .field[IO]("Pet" / "name")
-            .key((p: CoveragePet) => p.id)
-            .batch((keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "x").toMap))
-        )
-      else Resolvers.empty[IO]
+  /** Declares `Pet.owner` but serves nothing, which is what the startup check must catch. */
+  private val unservedOwners = Source[IO]("owners", ownersSdl.text)
 
-    List(
-      pets,
-      Source[IO]("owners", ownersSdl, ownerResolvers),
-      Source[IO]("unused", "", unused)
-    )
-  }
+  /** `Pet.name` is declared in the type definition, so nothing should resolve it; registering one is a mistake. */
+  private val unused = Source[IO]("unused", "")(
+    resolver
+      .field[IO](petsSdl.Pet.name)
+      .key((p: CoveragePet) => p.id)
+      .batch((keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "x").toMap))
+  )
 
-  private def schemaOf(sources: List[Source[IO]]): Schema =
-    Schema
-      .merge(sources.filter(_.sdl.nonEmpty).map(s => SdlFragment(s.id, s.sdl)))
-      .fold(errors => fail(errors.toChain.toList.map(_.render).mkString("; ")), identity)
+  private def schemaOf(torpor: Torpor[IO]): Schema =
+    torpor.schema.fold(errors => fail(errors.toChain.toList.map(_.render).mkString("; ")), identity)
 
   private def planWith(limits: Planner.Limits, query: String): Either[String, Plan] = {
-    val schema = schemaOf(sources())
+    val schema = schemaOf(Torpor[IO](pets, owners))
     Executable.validate(schema, query) match {
       case Left(errors)     => Left(errors.toChain.toList.map(_.render).mkString("\n"))
       case Right(validated) =>
@@ -95,7 +73,7 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
 
   test("depth counts inline fields, not just batch calls") {
     // pets(name) -> owner(name) is two levels of batch calls, but four levels of response nesting
-    val schema = schemaOf(sources())
+    val schema = schemaOf(Torpor[IO](pets, owners))
     val plan   = Executable.validate(schema, "{ pets { name owner { name } } }") match {
       case Left(errors)     => fail(errors.toChain.toList.map(_.render).mkString("\n"))
       case Right(validated) =>
@@ -125,18 +103,14 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
   }
 
   test("a fully served schema passes the startup coverage check") {
-    val sourceList = sources()
-    val torpor     = Torpor[IO](sourceList*)
-    val schema     = schemaOf(sourceList)
-    assertEquals(torpor.checkCoverage(schema), Right(()))
+    val torpor = Torpor[IO](pets, owners)
+    assertEquals(torpor.checkCoverage(schemaOf(torpor)), Right(()))
   }
 
   test("an SDL extension field with no resolver fails startup and names the field") {
-    val sourceList = sources(serveOwners = false)
-    val torpor     = Torpor[IO](sourceList*)
-    val schema     = schemaOf(sourceList)
+    val torpor = Torpor[IO](pets, unservedOwners)
 
-    torpor.checkCoverage(schema) match {
+    torpor.checkCoverage(schemaOf(torpor)) match {
       case Right(_)     => fail("expected a coverage error for Pet.owner")
       case Left(errors) =>
         val rendered = errors.toChain.toList.map(_.render)
@@ -147,11 +121,9 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
   }
 
   test("a resolver for a field that needs none is reported") {
-    val sourceList = sources(serveUnused = true)
-    val torpor     = Torpor[IO](sourceList*)
-    val schema     = schemaOf(sourceList)
+    val torpor = Torpor[IO](pets, owners, unused)
 
-    torpor.checkCoverage(schema) match {
+    torpor.checkCoverage(schemaOf(torpor)) match {
       case Right(_)     => fail("expected a coverage error for Pet.name")
       case Left(errors) =>
         assert(
@@ -164,9 +136,9 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
   test("startup merges and checks coverage, raising every problem at once") {
     import cats.effect.unsafe.implicits.global
 
-    assert(Torpor[IO](sources()*).startup.attempt.unsafeRunSync().isRight)
+    assert(Torpor[IO](pets, owners).startup.attempt.unsafeRunSync().isRight)
 
-    Torpor[IO](sources(serveOwners = false)*).startup.attempt.unsafeRunSync() match {
+    Torpor[IO](pets, unservedOwners).startup.attempt.unsafeRunSync() match {
       case Right(_)    => fail("expected startup to refuse an unserved field")
       case Left(error) =>
         assert(error.isInstanceOf[TorporStartupException], error.toString)
@@ -175,9 +147,8 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
   }
 
   test("the request path applies the limits") {
-    val sourceList = sources()
-    val torpor     = Torpor[IO](sourceList*).withLimits(Planner.Limits(maxDepth = 1))
-    val schema     = schemaOf(sourceList)
+    val torpor = Torpor[IO](pets, owners).withLimits(Planner.Limits(maxDepth = 1))
+    val schema = schemaOf(torpor)
 
     torpor.query(schema, "{ pets { name owner { name } } }") match {
       case Right(_)    => fail("expected the limit to reject the query")
