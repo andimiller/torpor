@@ -15,15 +15,20 @@ class SchemaMacroSuite extends munit.FunSuite {
     assert(!shop.text.contains("|"), shop.text)
   }
 
-  test("coordinates cover definitions and extensions") {
-    assertEquals(shop.coordinate("Character", "corporation"), FieldCoordinate("Character", "corporation"))
-    assertEquals(shop.coordinate("Query", "character"), FieldCoordinate("Query", "character"))
-    assertEquals(shop.coordinates.size, 4)
+  test("types and fields are members, for definitions and extensions") {
+    assertEquals(shop.Character.corporation, FieldCoordinate("Character", "corporation"))
+    assertEquals(shop.Corporation.id, FieldCoordinate("Corporation", "id"))
+    assertEquals(shop.Query.character, FieldCoordinate("Query", "character"))
   }
 
-  test("a missing coordinate fails loudly and lists what exists") {
-    val error = intercept[NoSuchElementException](shop.coordinate("Character", "nope"))
-    assert(error.getMessage.contains("Character.corporation"), error.getMessage)
+  test("a member's type names its parent type and field") {
+    val typed: FieldCoordinate.Of["Character", "corporation"] = shop.Character.corporation
+    assertEquals(typed, FieldCoordinate("Character", "corporation"))
+  }
+
+  test("a type or field the SDL lacks is a compile error") {
+    assert(compileErrors("shop.Character.nope").contains("nope"), compileErrors("shop.Character.nope"))
+    assert(compileErrors("shop.Charactr.id").contains("Charactr"), compileErrors("shop.Charactr.id"))
   }
 
   test("the text merges, which is what a golden test needs") {

@@ -37,7 +37,8 @@ val esi: EsiApi[IO] = new EsiApi[IO] {
 }
 
 // 2. Define your GraphQL schemas, as SDL, per source. Both are parsed and validated when this compiles, and each
-//    gives you the text to merge plus the field coordinates used below.
+//    gives you the text to merge plus its field coordinates as members: `universe.Character.corporation` compiles
+//    only if that SDL declares the field.
 val characters = schema"""type Character { id: ID! name: String! }
   |extend type Query { character(id: ID, name: String): Character }"""
 
@@ -47,7 +48,7 @@ val universe = schema"""type Corporation { id: ID! name: String! }
 // 3. Wire up resolution: a root field takes typed arguments, a hydrated field takes a batch of keys. Hydration only
 //    runs when the client selects it, and then once for the whole set.
 val charactersSource = Source[IO]("characters", characters.text, Resolvers[IO](
-  resolver.root[IO](characters.coordinate("Query", "character")) { (args: CharacterArgs) =>
+  resolver.root[IO](characters.Query.character) { (args: CharacterArgs) =>
     args.id match {
       case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
       case None     =>
@@ -60,7 +61,7 @@ val charactersSource = Source[IO]("characters", characters.text, Resolvers[IO](
 ))
 
 val universeSource = Source[IO]("universe", universe.text, Resolvers[IO](
-  resolver.field[IO](universe.coordinate("Character", "corporation"))
+  resolver.field[IO](universe.Character.corporation)
     .key((character: EsiCharacter) => character.corporationId)
     .batch((ids: NonEmptyList[Long]) => esi.corporations(ids))
 ))
@@ -114,7 +115,7 @@ Works today:
 | | |
 |---|---|
 | SDL | per-source fragments, `extend` across sources, merge with typed errors carrying `source:line:column` |
-| Compile-time checks | `schema"""…"""` (text + coordinates, validated) and `sdl"""…"""` (text only) |
+| Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile) and `sdl"""…"""` (text only) |
 | Validation | a documented subset of the spec's rules; unsupported constructs fail loudly |
 | Planner | query → DAG of batch calls, normalised selection sets, variables substituted to literals |
 | Executor | one call per node per level, errors as values with response paths, alias-keyed assembly |

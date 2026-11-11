@@ -28,7 +28,7 @@ extend type Constellation { region: Region! }
 ```
 
 Each source's SDL is a `schema"""…"""` literal, so it is parsed and validated when this file compiles; the resolvers
-take their coordinates from the same value (`characters.coordinate("Query", "character")`), and the text goes straight
+take their coordinates from the same value (`characters.Query.character`), and the text goes straight
 into `Source(...)`. Merged at startup, the whole schema is also what a golden test would compare.
 
 Three sources: `characters` owns `Character` and the root lookup; `routes` owns the route lookup and the two types it

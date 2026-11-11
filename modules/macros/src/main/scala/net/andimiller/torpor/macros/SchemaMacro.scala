@@ -1,15 +1,14 @@
 package net.andimiller.torpor.macros
 
 import net.andimiller.torpor.core.{FieldCoordinate, Sdl}
-import net.andimiller.torpor.schema.{Schema, SdlFragment}
+import net.andimiller.torpor.schema.{Schema, SdlFragment, TypeKind}
 
 import scala.quoted.*
 
 /** `schema"""…"""`: parse and validate the SDL at compile time, and emit its text plus every field coordinate.
   *
-  * Unlike a coordinate-checking macro, this needs no second inline macro at the call site: the map is an ordinary
-  * value, so `shop.coordinate("Character", "corporation")` is a plain lookup and the SDL is checked once, where it is
-  * written.
+  * The coordinates are carried in the result's type: a refinement adds one member per type with one member per field.
+  * That makes an unknown coordinate a compile error at the call site, without a second macro there.
   */
 object SchemaMacro {
 
@@ -34,16 +33,30 @@ object SchemaMacro {
     // stripMargin here so the `|` layout works without a trailing call
     val text = parts.mkString.stripMargin
 
-    Schema.coordinates(SdlFragment("<schema>", text)) match {
-      case Left(errors)       => report.errorAndAbort(errors.toChain.toList.map(_.render).mkString("\n"))
-      case Right(coordinates) =>
-        val entries = coordinates.map { coordinate =>
-          '{
-            (${ Expr(coordinate.parentType) }, ${ Expr(coordinate.field) }) ->
-              FieldCoordinate(${ Expr(coordinate.parentType) }, ${ Expr(coordinate.field) })
+    Schema.declarations(SdlFragment("<schema>", text)) match {
+      case Left(errors)    => report.errorAndAbort(errors.toChain.toList.map(_.render).mkString("\n"))
+      case Right(declared) =>
+        val objectTypes = declared.filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
+        val fields      = objectTypes.flatMap(tpe => tpe.fields.map(field => (tpe.name, field.name))).distinct.sorted
+
+        // Sdl { val Query: Sdl.TypeFields { val character: FieldCoordinate.Of["Query", "character"] } … }
+        val refined =
+          fields.groupBy(_._1).toList.sortBy(_._1).foldLeft(TypeRepr.of[Sdl]) { case (sdl, (parent, typeFields)) =>
+            val members = typeFields.foldLeft(TypeRepr.of[Sdl.TypeFields]) { case (inner, (_, field)) =>
+              Refinement(
+                inner,
+                field,
+                TypeRepr
+                  .of[FieldCoordinate.Of]
+                  .appliedTo(List(ConstantType(StringConstant(parent)), ConstantType(StringConstant(field))))
+              )
+            }
+            Refinement(sdl, parent, members)
           }
+
+        refined.asType match {
+          case '[r] => '{ new Sdl(${ Expr(text) }).asInstanceOf[r & Sdl] }
         }
-        '{ Sdl(${ Expr(text) }, Map(${ Varargs(entries) }*)) }
     }
   }
 }

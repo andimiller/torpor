@@ -39,19 +39,11 @@ object Schema {
       case Right(_)     => Nil
     }
 
-  /** Every field coordinate a fragment declares, validated. The `schema` macro builds its lookup map from this, so the
-    * compile-time check and the runtime map cannot disagree.
+  /** Every type a fragment defines or extends, validated, as written in that fragment alone. The `schema` macro reads
+    * its coordinates from this.
     */
-  def coordinates(
-      fragment: SdlFragment
-  ): Either[NonEmptyChain[SchemaError], List[net.andimiller.torpor.core.FieldCoordinate]] =
-    SangriaBridge.parse(fragment).map { parsed =>
-      (parsed.types ++ parsed.extensions.map(_.tpe))
-        .filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
-        .flatMap(tpe => tpe.fields.map(field => net.andimiller.torpor.core.FieldCoordinate(tpe.name, field.name)))
-        .distinct
-        .sortBy(_.render)
-    }
+  def declarations(fragment: SdlFragment): Either[NonEmptyChain[SchemaError], List[TypeDef]] =
+    SangriaBridge.parse(fragment).map(parsed => parsed.types ++ parsed.extensions.map(_.tpe))
 
   def merge(fragments: List[SdlFragment]): Either[NonEmptyChain[SchemaError], Schema] = {
     val results     = fragments.map(SangriaBridge.parse)

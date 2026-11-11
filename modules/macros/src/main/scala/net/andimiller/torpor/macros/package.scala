@@ -8,5 +8,7 @@ package object macros {
 
   /** SDL as a value: the text to merge, plus its field coordinates, both validated at compile time. */
   extension (inline sc: StringContext)
-    inline def schema(inline args: Any*): net.andimiller.torpor.core.Sdl = ${ SchemaMacro.impl('sc, 'args) }
+    transparent inline def schema(inline args: Any*): net.andimiller.torpor.core.Sdl = ${
+      SchemaMacro.impl('sc, 'args)
+    }
 }

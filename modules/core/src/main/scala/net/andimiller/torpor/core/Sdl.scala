@@ -1,19 +1,20 @@
 package net.andimiller.torpor.core
 
-/** SDL produced by the `schema"""…"""` macro: the text to merge, plus every field coordinate it declares.
+/** SDL produced by the `schema"""…"""` macro: the text to merge, with every field coordinate it declares in its type.
   *
-  * The map is built and validated at compile time, so it cannot be incomplete; `coordinate` is a lookup, and a miss is
-  * a programming error with a readable message rather than a startup surprise.
+  * The macro refines the value with one member per type, each with one member per field, so `sdl.Query.character`
+  * compiles only if the SDL declares `Query.character`, and an editor can complete it. The member's type names the
+  * coordinate's parent type and field.
   */
-final case class Sdl(text: String, coordinates: Map[(String, String), FieldCoordinate]) {
-  def coordinate(typeName: String, fieldName: String): FieldCoordinate =
-    coordinates.getOrElse(
-      (typeName, fieldName),
-      throw new NoSuchElementException(
-        s"the SDL declares no field '$typeName.$fieldName'; it has: ${coordinates.keys.toList
-          .map { case (t, f) => s"$t.$f" }
-          .sorted
-          .mkString(", ")}"
-      )
-    )
+final class Sdl(val text: String) extends Selectable {
+
+  /** `sdl.Query`. The macro's refinement decides which names typecheck; this only builds the value. */
+  def selectDynamic(typeName: String): Sdl.TypeFields = Sdl.TypeFields(typeName)
+}
+
+object Sdl {
+
+  final class TypeFields(typeName: String) extends Selectable {
+    def selectDynamic(fieldName: String): FieldCoordinate = FieldCoordinate(typeName, fieldName)
+  }
 }

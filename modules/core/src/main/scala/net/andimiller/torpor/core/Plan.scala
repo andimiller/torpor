@@ -70,6 +70,14 @@ final case class FieldCoordinate(parentType: String, field: String) {
   def render: String = s"$parentType.$field"
 }
 
+object FieldCoordinate {
+
+  /** A coordinate whose type names its parent type and its field, as the schema macro emits them. It is a plain
+    * `FieldCoordinate` at runtime; the type exists so the compiler can check things by coordinate.
+    */
+  opaque type Of[Parent <: String, Field <: String] <: FieldCoordinate = FieldCoordinate
+}
+
 final case class Argument(name: String, value: Value)
 
 /** Ordered and normalised: fragments expanded, `@skip`/`@include` applied, same response keys merged and deduped. Two
