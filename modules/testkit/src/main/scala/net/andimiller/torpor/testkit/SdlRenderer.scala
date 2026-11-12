@@ -1,11 +1,12 @@
 package net.andimiller.torpor.testkit
 
+import net.andimiller.torpor.core.Value
 import net.andimiller.torpor.schema.{FieldDef, InputValueDef, Schema, TypeDef, TypeKind, TypeRef}
 
 /** The merged schema as SDL, so the contract can be reviewed as one file.
   *
-  * Types are sorted by name; fields keep the order the sources declared them, which is the order clients see. Defaults
-  * are not printed because the schema model does not keep them.
+  * Types are sorted by name; fields keep the order the sources declared them, which is the order clients see. Argument
+  * defaults are printed as SDL literals.
   */
 object SdlRenderer {
 
@@ -37,17 +38,17 @@ object SdlRenderer {
   private def renderArgument(argument: InputValueDef): String =
     s"${argument.name}: ${renderRef(argument.tpe)}" + argument.default.fold("")(value => s" = ${renderValue(value)}")
 
-  private def renderValue(value: net.andimiller.torpor.core.Value): String = value match {
-    case net.andimiller.torpor.core.Value.StringValue(v)    => "\"" + v + "\""
-    case net.andimiller.torpor.core.Value.BooleanValue(v)   => v.toString
-    case net.andimiller.torpor.core.Value.EnumValue(v)      => v
-    case net.andimiller.torpor.core.Value.IntValue(v)       => v.toString
-    case net.andimiller.torpor.core.Value.FloatValue(v)     => v.toString
-    case net.andimiller.torpor.core.Value.NullValue         => "null"
-    case net.andimiller.torpor.core.Value.ListValue(values) => values.map(renderValue).mkString("[", ", ", "]")
-    case net.andimiller.torpor.core.Value.ObjectValue(fs)   =>
+  private def renderValue(value: Value): String = value match {
+    case Value.StringValue(v)    => "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    case Value.BooleanValue(v)   => v.toString
+    case Value.EnumValue(v)      => v
+    case Value.IntValue(v)       => v.toString
+    case Value.FloatValue(v)     => v.toString
+    case Value.NullValue         => "null"
+    case Value.ListValue(values) => values.map(renderValue).mkString("[", ", ", "]")
+    case Value.ObjectValue(fs)   =>
       fs.map { case (k, v) => s"$k: ${renderValue(v)}" }.mkString("{", ", ", "}")
-    case net.andimiller.torpor.core.Value.VariableValue(n)  => "$" + n
+    case Value.VariableValue(n)  => "$" + n
   }
 
   private def renderRef(ref: TypeRef): String = ref match {

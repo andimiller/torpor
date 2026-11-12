@@ -3,10 +3,11 @@ package net.andimiller.torpor.examples.esi
 import cats.data.NonEmptyList
 import cats.effect.IO
 import net.andimiller.torpor.examples.esi.client.*
-import net.andimiller.torpor.core.PathSegment
+import net.andimiller.torpor.core.{PathSegment, Response as GraphQLResponse}
 import net.andimiller.torpor.source.{Planner, RunOutcome, Torpor}
 import net.andimiller.torpor.schema.Executable
-import org.http4s.{HttpApp, Response, Status, Uri}
+import io.circe.Json
+import org.http4s.{HttpApp, Method, Response, Status, Uri}
 import org.http4s.circe.*
 import org.http4s.client.Client
 
@@ -97,7 +98,7 @@ final class EsiSuite extends munit.CatsEffectSuite {
       namesById = Map(6001L -> "The Forge", 6002L -> "Domain")
     )
 
-  private def run(esi: FakeEsi, query: String): IO[net.andimiller.torpor.core.Response] = {
+  private def run(esi: FakeEsi, query: String): IO[GraphQLResponse] = {
     val torpor = EsiGraphQL.torpor(esi)
     val schema = EsiGraphQL.schema(esi)
     torpor.query(schema, query) match {
@@ -127,7 +128,7 @@ final class EsiSuite extends munit.CatsEffectSuite {
   test("an unknown name is null, not an error") {
     val esi = fake()
     run(esi, """{ character(name: "Nobody") { name } }""").map { response =>
-      assert(response.data.hcursor.downField("character").focus.contains(io.circe.Json.Null))
+      assert(response.data.hcursor.downField("character").focus.contains(Json.Null))
       assert(response.errors.isEmpty)
     }
   }
@@ -174,7 +175,7 @@ final class EsiSuite extends munit.CatsEffectSuite {
           .downField("corporation")
           .downField("alliance")
           .focus
-          .contains(io.circe.Json.Null)
+          .contains(Json.Null)
       )
       assert(response.errors.isEmpty, response.errors.toList.map(_.message).mkString("; "))
     }
@@ -263,7 +264,7 @@ final class EsiSuite extends munit.CatsEffectSuite {
 
   test("no route is null, not an error") {
     run(fake(), "{ route(origin: 1, destination: 2) { name } }").map { response =>
-      assert(response.data.hcursor.downField("route").focus.contains(io.circe.Json.Null))
+      assert(response.data.hcursor.downField("route").focus.contains(Json.Null))
       assert(response.errors.isEmpty)
     }
   }
@@ -273,10 +274,10 @@ final class EsiSuite extends munit.CatsEffectSuite {
     val schema  = EsiGraphQL.schema(esi)
     val app     = ExplainRoute.routes(schema).orNotFound
     val request = org.http4s
-      .Request[IO](org.http4s.Method.POST, Uri.unsafeFromString("/explain"))
+      .Request[IO](Method.POST, Uri.unsafeFromString("/explain"))
       .withEntity(
-        io.circe.Json.obj(
-          "query" -> io.circe.Json.fromString(
+        Json.obj(
+          "query" -> Json.fromString(
             "{ route(origin: 4000, destination: 5000) { name constellation { region { name } } } }"
           )
         )

@@ -3,8 +3,8 @@
 GraphQL for Scala that keeps the **contract as data** and the **code as code**.
 
 You write the schema as SDL, check it when the code compiles, and register resolvers against field coordinates.
-Fan-out takes a batch of keys, so one request costs one call per level instead of one per row. When a backend
-can't answer in time, the run suspends to a table and resumes when the work finishes — days later if it has to.
+Fan-out takes a batch of keys, so one request costs one call per level instead of one per row. When a backend is slow,
+the run suspends to a table and resumes when the work finishes — days later if needed.
 
 Built on cats-effect and [hedgehogs](https://github.com/andimiller/hedgehogs).
 
@@ -15,11 +15,12 @@ import com.comcast.ip4s.*
 import net.andimiller.torpor.examples.esi.client.*
 import net.andimiller.torpor.http.TorporHttp
 import net.andimiller.torpor.macros.schema
+import net.andimiller.torpor.schema.Schema
 import net.andimiller.torpor.source.*
 import org.http4s.ember.server.EmberServerBuilder
 
-// 1. Write your types and interfaces like you usually would. `EsiApi` is the client from examples/shared-esi. Your
-//    domain types know nothing about GraphQL: no effect fields, no schema annotations.
+// 1. Write your domain types as usual. `EsiApi` is the client from examples/shared-esi. Your domain types know
+//    nothing about GraphQL: no effect fields, no schema annotations.
 
 val esi: EsiApi[IO] = new EsiApi[IO] {
   def characterIdByName(name: String): IO[Option[Long]]                    = IO.pure(None)
@@ -37,9 +38,9 @@ val esi: EsiApi[IO] = new EsiApi[IO] {
 //    ESI ids are numbers, so `ID` arguments decode as `Long`.
 given Scalar["ID", Long]()
 
-// 3. Define your GraphQL schemas, as SDL, per source. Both are parsed and validated when this compiles, and each
-//    gives you the text to merge plus its field coordinates as members: `universe.Character.corporation` compiles
-//    only if that SDL declares the field, and `characters.Query.character` carries that field's arguments' types.
+// 3. Define one SDL fragment per source. Each is parsed and validated at compile time, and gives you the text to
+//    merge plus field coordinates as members: `universe.Character.corporation` compiles only if that SDL declares
+//    the field, and `characters.Query.character` carries the field's argument types.
 val characters = schema"""type Character { id: ID! name: String! }
   |extend type Query { character(id: ID, name: String): Character }"""
 
@@ -68,13 +69,12 @@ val universeSource = Source[IO]("universe", universe)(
     .batch((_, ids: NonEmptyList[Long]) => esi.corporations(ids))
 )
 
-// 5. Assemble. Each source's type records which fields its SDL needs resolved and what its resolvers produce and
-//    decode, so this checks, when it compiles, that every source resolves exactly the fields it must (here
-//    `Query.character` and `Character.corporation`), and that the sources link: `Character.corporation` reads
-//    `corporationId` from each character, and `characters` produces characters as `EsiCharacter`, which has it.
-//    `startup` merges the fragments, repeats the coverage check against the merged schema, and raises one exception
-//    listing every problem. Running it is what makes the schema servable.
-val started: IO[(Torpor[IO], net.andimiller.torpor.schema.Schema)] = Torpor[IO](charactersSource, universeSource).startup
+// 5. Assemble. Each source's type records the fields its SDL must resolve and what its resolvers produce and
+//    decode, so this compile-time check proves every source resolves exactly its required fields (here
+//    `Query.character` and `Character.corporation`) and that the sources link: `Character.corporation` reads
+//    `corporationId` from the characters the other source produces. `startup` merges the fragments, repeats the
+//    coverage check against the merged schema, and raises one exception listing every problem.
+val started: IO[(Torpor[IO], Schema)] = Torpor[IO](charactersSource, universeSource).startup
 
 // 6. Mount into a server: one http4s route, the same one for every schema.
 val server = started.flatMap { case (torpor, schema) =>
@@ -88,15 +88,15 @@ val server = started.flatMap { case (torpor, schema) =>
 }
 ```
 
-Every line above is compiled by mdoc against the real modules. The runnable version — with the ESI client in
-`examples/shared-esi`, real arguments and a live HTTP server — is [`examples/esi`](examples/esi).
+Every line above is compiled by mdoc. The runnable version, with the ESI client from
+`examples/shared-esi`, real arguments and a live server, is [`examples/esi`](examples/esi).
 
 ## Why
 
-**The contract is data; the code is code.** The SDL is a text artifact — reviewable, diffable, sendable to a
+**The contract is data; the code is code.** The SDL is a text artefact: reviewable, diffable, sendable to a
 client team, checked by `schema"""…"""` at compile time. Resolvers are functions in a table, and your domain
 types never learn that GraphQL exists. In code-first libraries the schema *is* the resolver graph, so a data
-type grows an effect field every time a value becomes lazy, and the effect type quietly decides the
+type grows an effect field every time a value becomes lazy, and the effect type decides the
 contract's nullability.
 
 **Batching is impossible to get wrong.** A resolver that fans out takes `NonEmptyList[K] => F[Map[K, V]]`.
@@ -111,14 +111,14 @@ resume cannot both execute. Resume from a fresh process with a fresh runtime; no
 needed. No workflow engine involved.
 
 **One contract, one plan.** `Plan` is plain serialisable data — the same value the executor runs, the snapshot
-stores, and `Explain.mermaid` draws. What you inspect is what executes, before it executes: the example serves
-`POST /explain`, which prints the plan for a query without running a resolver.
+stores, and `Explain.mermaid` draws. What you inspect is what runs: the example serves `POST /explain`, which prints the plan for a query without
+executing a resolver.
 
 ## Status
 
 Works today:
 
-| | |
+| Feature | What works |
 |---|---|
 | SDL | per-source fragments, `extend` across sources, merge with typed errors carrying `source:line:column` |
 | Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile; root resolver arguments typed from the SDL) and `sdl"""…"""` (text only); assembling sources checks that each source resolves exactly the fields its SDL requires, and that every keyed field's parent type has the fields it reads |
@@ -137,7 +137,7 @@ Works today:
 
 Not built yet — do not assume these work:
 
-- `@defer`/`@stream`, SSE, a resume endpoint (M2). A suspended run is currently usable programmatically only.
+- `@defer`/`@stream`, SSE, a resume endpoint (M2). A suspended run is usable programmatically only.
 - Subscriptions. Keyed (batch) fields cannot suspend. Node timeouts, cost metrics, a per-run cross-level result cache.
 - Full spec value coercion for custom scalars: a custom scalar's input decoding is whatever `Decoder` its `Scalar` binding names.
 - Postgres store integration tests (it compiles; the CAS contract is proven against the in-memory store).
@@ -151,7 +151,7 @@ Not built yet — do not assume these work:
   [Grackle](https://github.com/typelevel/grackle).
 - **Not ZIO.** `Torpor[F]` for `F[_]: Concurrent`.
 - **Not a client or a codegen.** [Caliban](https://github.com/ghostdogpr/caliban) covers that ground.
-- **Not done.** See [docs/roadmap.md](docs/roadmap.md).
+- **Not complete.** See [docs/roadmap.md](docs/roadmap.md) for what is next.
 
 ## Modules
 
@@ -167,14 +167,14 @@ Not built yet — do not assume these work:
 | `torpor-http` | http4s routes, per-request context setup |
 | `torpor-testkit` | golden test for the merged contract: sources in, one `.graphqls` out, a diff if it drifts |
 
-Only `torpor-schema` may import `sangria.*` (the parser); `scripts/check-imports.sh` enforces it.
+Only `torpor-schema` imports `sangria.*` (the parser).
 
 ## Example
 
-[`examples/esi`](examples/esi) is a working service over EVE Online's ESI: unauthenticated, custom User-Agent,
-lookup by id or name, optionally hydrating corporation and alliance, plus a route between two solar systems
-that hydrates systems, constellations and regions — the multi-level fan-out — and a `/explain` route for the
-plan behind any query.
+[`examples/esi`](examples/esi) is a working service over EVE Online's ESI. It is unauthenticated, sets a custom
+User-Agent, looks characters up by id or name, and optionally hydrates corporation and alliance. It also serves a
+route between two solar systems that hydrates systems, constellations and regions — the multi-level fan-out — and
+a `/explain` route for the plan behind any query.
 [`examples/esi-caliban`](examples/esi-caliban) is the same character and corporation service in Caliban, for
 comparison — including the call counts that show why the batch signature matters.
 
@@ -182,7 +182,6 @@ comparison — including the call counts that show why the batch signature matte
 
 ```
 sbt test
-./scripts/check-imports.sh
 ```
 
 Scala 3.3 LTS, JVM.

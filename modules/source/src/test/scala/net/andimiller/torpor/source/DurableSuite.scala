@@ -6,7 +6,7 @@ import cats.syntax.all._
 import io.circe.{Decoder, Encoder, Json}
 import net.andimiller.torpor.core.Step
 import net.andimiller.torpor.macros.schema
-import net.andimiller.torpor.schema.Schema
+import net.andimiller.torpor.schema.{Schema, SdlFragment}
 import net.andimiller.torpor.snapshot.*
 
 import java.util.concurrent.atomic.AtomicInteger
@@ -173,16 +173,16 @@ final class DurableSuite extends munit.FunSuite {
     val state = suspend()
 
     // a real schema change: the type gains a field, so the fingerprint moves
-    val drifted = net.andimiller.torpor.schema.Schema
+    val drifted = Schema
       .merge(
         List(
-          net.andimiller.torpor.schema.SdlFragment(
+          SdlFragment(
             "pets",
             """type Pet { id: ID! name: String! nickname: String }
                                                             |extend type Query { pets: [Pet!]! }
                                                             |""".stripMargin
           ),
-          net.andimiller.torpor.schema.SdlFragment("reports", reportsSdl.text)
+          SdlFragment("reports", reportsSdl.text)
         )
       )
       .fold(errors => fail(errors.toChain.toList.map(_.render).mkString("; ")), identity)

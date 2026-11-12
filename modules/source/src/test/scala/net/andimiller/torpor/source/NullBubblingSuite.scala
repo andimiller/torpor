@@ -4,6 +4,7 @@ import cats.data.NonEmptyList
 import cats.effect.IO
 import io.circe.{Decoder, Encoder, Json}
 import net.andimiller.torpor.core.{FieldError, PathSegment}
+import net.andimiller.torpor.schema.Schema
 import net.andimiller.torpor.macros.schema
 
 final case class BubblingParent(id: String) derives Encoder.AsObject, Decoder
@@ -12,7 +13,7 @@ final case class BubblingChild(id: String) derives Encoder.AsObject, Decoder
 /** A null in a non-null position nulls the nearest nullable ancestor and keeps the error at the original path. */
 final class NullBubblingSuite extends munit.CatsEffectSuite {
 
-  private def run(torpor: Torpor[IO], schema: net.andimiller.torpor.schema.Schema)(query: String) =
+  private def run(torpor: Torpor[IO], schema: Schema)(query: String) =
     torpor.query(schema, query) match {
       case Left(error) => IO(fail(error.render.mkString("\n")))
       case Right(io)   => io

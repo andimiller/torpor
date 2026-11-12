@@ -2,7 +2,7 @@ package net.andimiller.torpor.source
 
 import cats.effect.IO
 import io.circe.{Decoder, Encoder, Json}
-import net.andimiller.torpor.core.{FieldError, Scalar}
+import net.andimiller.torpor.core.{FieldError, PathSegment, Scalar}
 import net.andimiller.torpor.macros.schema
 
 import java.time.Instant
@@ -98,7 +98,7 @@ final class InputObjectsSuite extends munit.CatsEffectSuite {
       assert(response.data.hcursor.downField("at").focus.contains(Json.Null))
       val errors = response.errors.toList
       assertEquals(errors.map(_.code), List(FieldError.InvalidInput))
-      assertEquals(errors.head.path, List(net.andimiller.torpor.core.PathSegment.Field("at")))
+      assertEquals(errors.head.path, List(PathSegment.Field("at")))
       assert(errors.head.message.contains("not an ISO instant"), errors.head.message)
     }
   }

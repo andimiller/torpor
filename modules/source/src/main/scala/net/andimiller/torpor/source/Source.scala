@@ -4,7 +4,7 @@ import cats.{Applicative, Functor}
 import cats.data.NonEmptyList
 import cats.syntax.all._
 import io.circe.{Decoder, Encoder, Json, parser}
-import net.andimiller.torpor.core.{Arguments, FieldCoordinate, InvalidInputException, Resolver, Sdl, Step}
+import net.andimiller.torpor.core.{Argument, Arguments, FieldCoordinate, InvalidInputException, Resolver, Sdl, Step}
 
 /** A source: an SDL fragment plus the resolvers that serve it.
   *
@@ -260,13 +260,13 @@ object resolver {
   /** Not a valid JSON key encoding, so it cannot collide with a real key: encoded keys start with a JSON token. */
   private val AbsentKey = "\u0000absent"
 
-  private def argumentsJson(arguments: List[net.andimiller.torpor.core.Argument]): Json =
+  private def argumentsJson(arguments: List[Argument]): Json =
     Json.obj(arguments.map(a => a.name -> a.value.toJson): _*)
 
   private def rootEntry[F[_]: Functor, A: Decoder, B: Encoder](
       coordinate: FieldCoordinate,
       run: A => F[B]
-  ): (FieldCoordinate, Resolver[F])                                                     =
+  ): (FieldCoordinate, Resolver[F])                          =
     coordinate -> Resolver.Root { arguments =>
       Decoder[A].decodeJson(argumentsJson(arguments)) match {
         case Left(error)    => throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
@@ -342,7 +342,7 @@ object resolver {
 
   private def decodeArguments[A: Decoder](
       coordinate: FieldCoordinate,
-      arguments: List[net.andimiller.torpor.core.Argument]
+      arguments: List[Argument]
   ): A =
     Decoder[A].decodeJson(argumentsJson(arguments)) match {
       case Left(error)    =>

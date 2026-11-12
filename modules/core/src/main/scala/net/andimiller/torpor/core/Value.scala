@@ -34,8 +34,8 @@ enum Value {
 
 object Value {
 
-  /** Read a client-supplied variable value. Numbers stay numbers, strings stay strings: enum-vs-string is a coercion
-    * question the planner does not answer (5.6.1 is not implemented), so nothing here guesses.
+  /** Read a client-supplied variable value. Numbers stay numbers and strings stay strings: the planner does the
+    * coercion against the schema, so nothing here guesses.
     */
   def fromJson(json: Json): Value =
     json.fold(

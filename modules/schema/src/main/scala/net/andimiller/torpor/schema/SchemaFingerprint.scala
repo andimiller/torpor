@@ -1,5 +1,7 @@
 package net.andimiller.torpor.schema
 
+import net.andimiller.torpor.core.Value
+
 import java.security.MessageDigest
 
 /** A stable hash of the merged schema, stored in every snapshot.
@@ -42,7 +44,7 @@ object SchemaFingerprint {
     digest.map(b => f"$b%02x").mkString
   }
 
-  private def renderValue(value: net.andimiller.torpor.core.Value): String =
+  private def renderValue(value: Value): String =
     value.toJson.noSpaces
 
   private def render(tpe: TypeRef): String =

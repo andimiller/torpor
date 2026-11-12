@@ -1,5 +1,6 @@
 package net.andimiller.torpor.source
 
+import cats.data.NonEmptyList
 import cats.effect.IO
 import io.circe.{Encoder, Json}
 import net.andimiller.torpor.macros.schema
@@ -78,7 +79,7 @@ final class UnionsSuite extends munit.CatsEffectSuite {
       resolver
         .field[IO](extension.And.count)
         .key((and: Json) => and.hcursor.get[String]("__typename").getOrElse(""))
-        .batch { (_, keys: cats.data.NonEmptyList[String]) =>
+        .batch { (_, keys: NonEmptyList[String]) =>
           IO.pure(keys.toList.map(_ -> 2).toMap)
         }
     )

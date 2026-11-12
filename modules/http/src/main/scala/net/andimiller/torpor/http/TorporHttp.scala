@@ -35,7 +35,7 @@ object TorporHttp {
         "errors" -> Json.fromValues(messages.map(message => Json.obj("message" -> Json.fromString(message))))
       )
 
-    def respond(body: Json): F[org.http4s.Response[F]] = {
+    def respond(body: Json): F[Response[F]] = {
       val cursor = body.hcursor
       cursor.get[String]("query") match {
         case Left(_) =>

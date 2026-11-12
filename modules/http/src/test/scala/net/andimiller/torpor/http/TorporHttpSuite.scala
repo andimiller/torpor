@@ -94,7 +94,7 @@ final class TorporHttpSuite extends munit.CatsEffectSuite {
   }
 
   test("a missing limit is reported as a GraphQL error") {
-    val limited                                = Torpor[IO](source).withLimits(net.andimiller.torpor.source.Planner.Limits(maxDepth = 0))
+    val limited                                = Torpor[IO](source).withLimits(Planner.Limits(maxDepth = 0))
     val limitedApp                             = TorporHttp.routes(limited, schema).orNotFound
     implicit val json: EntityDecoder[IO, Json] = jsonDecoder[IO]
     limitedApp

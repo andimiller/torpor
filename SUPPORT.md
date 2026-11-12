@@ -76,11 +76,13 @@ Not implemented, and therefore rejected or deferred (see "Scoping discipline" in
 
 - Field ownership comes from the merged schema: a field declared by `extend type` gets its own node; a field declared in
   the type definition is read inline off the value the parent node produced. Root fields always get a node.
-- Variables are substituted before planning, so the plan only holds literals (no coercion, see above).
+- Variables are substituted before planning, so the plan only holds literals; values are coerced against the schema
+  (see above) and SDL defaults are filled in.
 - Fragments are expanded and merged by response key before a selection set is used anywhere, so batch grouping does not
   depend on query text.
 - `@skip`/`@include` are evaluated at plan time; a non-boolean `if` is an error.
-- Type conditions that narrow the parent type (interfaces/unions) are rejected as unsupported until M1.
+- Type conditions select fragments by the value's `__typename`; a selection carries the concrete types it applies to,
+  so a batch only sees keys of members whose fragment selects it.
 - Mutation root fields are planned as independent nodes; serial execution is the executor's job.
 - Two aliases of the same field plan two nodes: node sharing across response keys is not implemented (duplicate call,
   never a wrong answer).

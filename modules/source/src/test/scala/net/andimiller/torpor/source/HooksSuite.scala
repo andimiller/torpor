@@ -4,7 +4,7 @@ import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.effect.Ref
 import io.circe.{Decoder, Encoder, Json}
-import net.andimiller.torpor.core.{FieldCoordinate, FieldError, HookError, Hooks, PathSegment}
+import net.andimiller.torpor.core.{Argument, FieldCoordinate, FieldError, HookError, Hooks, PathSegment}
 import net.andimiller.torpor.macros.schema
 
 import scala.concurrent.duration.FiniteDuration
@@ -37,7 +37,7 @@ final class HooksSuite extends munit.CatsEffectSuite {
     val hooks = new Hooks[IO] {
       override def authorize(
           coordinate: FieldCoordinate,
-          args: List[net.andimiller.torpor.core.Argument],
+          args: List[Argument],
           values: Map[String, Json]
       ) =
         IO.pure(

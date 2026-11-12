@@ -8,7 +8,8 @@ import io.circe.Json
 import net.andimiller.torpor.core.{Executor, FieldCoordinate, Hooks, Plan, Resolver, Response, Value}
 
 import scala.concurrent.duration.*
-import net.andimiller.torpor.schema.{Executable, Introspection, Schema, SdlFragment, ValidationError}
+import net.andimiller.torpor.schema.{Executable, Introspection, Schema, SchemaError, SdlFragment, ValidationError}
+import net.andimiller.torpor.snapshot.SnapshotStore
 
 /** Everything that stopped a service from starting: merge errors, then coverage errors. */
 final class TorporStartupException(val problems: List[String])
@@ -62,7 +63,7 @@ final class Torpor[F[_]: Concurrent] private (
   /** Replace the extension points: authorization, error mapping, spans, slow-query and per-node timing. */
   def withHooks(hooks: Hooks[F]): Torpor[F] = new Torpor[F](sources, limits, hooks)
 
-  def schema: Either[NonEmptyChain[net.andimiller.torpor.schema.SchemaError], Schema] =
+  def schema: Either[NonEmptyChain[SchemaError], Schema] =
     // a source may exist only to serve fields another source declares, so a blank fragment is not an error
     Schema.merge(sources.filter(_.sdl.nonEmpty).map(source => SdlFragment(source.id, source.sdl)))
 
@@ -108,7 +109,7 @@ final class Torpor[F[_]: Concurrent] private (
     registry.get(source -> coordinate)
 
   /** A durable runtime: same sources, but suspended runs are persisted and can be resumed after a restart. */
-  def durable(store: net.andimiller.torpor.snapshot.SnapshotStore[F]): F[Durable[F]]                =
+  def durable(store: SnapshotStore[F]): F[Durable[F]]                                               =
     Durable[F](this, store)
 
   def run(plan: Plan): F[Response]   =
@@ -187,7 +188,9 @@ object Torpor {
 
 object Variables {
 
-  /** Client variables are JSON; the planner only substitutes them, so no coercion happens here. */
+  /** Client variables are JSON; the planner substitutes and coerces them against the schema, so this only translates
+    * the JSON shape.
+    */
   def fromJson(json: Json): Map[String, Value] =
     json.asObject.map(_.toMap.map { case (name, value) => name -> Value.fromJson(value) }).getOrElse(Map.empty)
 }

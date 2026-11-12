@@ -2,7 +2,7 @@ package net.andimiller.torpor.source
 
 import cats.data.NonEmptyList
 import cats.effect.IO
-import io.circe.{Decoder, Encoder, Json}
+import io.circe.{ACursor, Decoder, Encoder, Json}
 import net.andimiller.torpor.core.{FieldError, PathSegment, Plan, Response}
 import net.andimiller.torpor.macros.schema
 import net.andimiller.torpor.schema.Executable
@@ -124,7 +124,7 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
     def execute(query: String): IO[Response] = torpor.run(plan(query))
   }
 
-  private def fieldNames(cursor: io.circe.ACursor): List[String] =
+  private def fieldNames(cursor: ACursor): List[String] =
     cursor.keys.map(_.toList).getOrElse(Nil)
 
   test("one call per node per level, with keys deduped") {

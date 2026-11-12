@@ -1,5 +1,7 @@
 package net.andimiller.torpor.schema
 
+import net.andimiller.torpor.core.Value
+
 export net.andimiller.torpor.core.TypeRef
 
 /** One SDL fragment and the id of the source that serves it. */
@@ -18,7 +20,7 @@ final case class InputValueDef(
     name: String,
     tpe: TypeRef,
     /** The SDL default, kept as a literal so it can fill omitted arguments and be printed by introspection. */
-    default: Option[net.andimiller.torpor.core.Value] = None,
+    default: Option[Value] = None,
     description: Option[String] = None
 ) {
   def hasDefault: Boolean = default.isDefined
@@ -36,7 +38,7 @@ final case class FieldDef(
     fromExtension: Boolean = false,
     deprecationReason: Option[String] = None,
     /** The SDL default of an input-object field; unused for output fields. */
-    defaultValue: Option[net.andimiller.torpor.core.Value] = None
+    defaultValue: Option[Value] = None
 )
 
 final case class EnumValueDef(

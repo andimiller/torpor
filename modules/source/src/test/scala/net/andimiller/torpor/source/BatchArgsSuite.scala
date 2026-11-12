@@ -5,6 +5,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import io.circe.{Decoder, Encoder}
 import net.andimiller.torpor.macros.schema
+import net.andimiller.torpor.schema.Schema
 
 final case class Workspace(id: String) derives Encoder.AsObject, Decoder
 final case class Cohort(id: String) derives Encoder.AsObject, Decoder
@@ -17,8 +18,7 @@ final class BatchArgsSuite extends munit.CatsEffectSuite {
     |extend type Workspace { cohorts(first: Int, after: String): [Cohort!]! }
     |extend type Query { workspaces: [Workspace!]! }"""
 
-  private def fixture
-      : IO[(Torpor[IO], net.andimiller.torpor.schema.Schema, Ref[IO, List[(Option[Int], List[String])]])] =
+  private def fixture: IO[(Torpor[IO], Schema, Ref[IO, List[(Option[Int], List[String])]])] =
     for {
       calls <- Ref.of[IO, List[(Option[Int], List[String])]](Nil)
       source = Source[IO]("workspaces", sdl)(

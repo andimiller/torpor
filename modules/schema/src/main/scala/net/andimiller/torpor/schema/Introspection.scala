@@ -11,8 +11,8 @@ import net.andimiller.torpor.core.Value
   * Introspection-only documents skip validation and planning entirely: no resolver runs and no plan is built. Anything
   * that is not purely `__schema`/`__type`/`__typename` at the root returns `None` and takes the normal path.
   *
-  * `@deprecated` is not modelled and defaults are not stored, so every `isDeprecated` is false, `defaultValue` is null,
-  * and `includeDeprecated` changes nothing.
+  * `@deprecated` is reported on fields and enum values, and input defaults are rendered as GraphQL literals.
+  * `includeDeprecated` is ignored: deprecated entries are always returned, with their flags.
   */
 object Introspection {
 
@@ -299,20 +299,20 @@ object Introspection {
   )
 
   /** A default as a GraphQL literal, which is what `__InputValue.defaultValue` is defined to be. */
-  private def renderValue(value: net.andimiller.torpor.core.Value): String =
+  private def renderValue(value: Value): String =
     value match {
-      case net.andimiller.torpor.core.Value.IntValue(v)         => v.toString
-      case net.andimiller.torpor.core.Value.FloatValue(v)       => v.toString
-      case net.andimiller.torpor.core.Value.StringValue(v)      =>
+      case Value.IntValue(v)         => v.toString
+      case Value.FloatValue(v)       => v.toString
+      case Value.StringValue(v)      =>
         "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-      case net.andimiller.torpor.core.Value.BooleanValue(v)     => v.toString
-      case net.andimiller.torpor.core.Value.EnumValue(v)        => v
-      case net.andimiller.torpor.core.Value.NullValue           => "null"
-      case net.andimiller.torpor.core.Value.ListValue(values)   =>
+      case Value.BooleanValue(v)     => v.toString
+      case Value.EnumValue(v)        => v
+      case Value.NullValue           => "null"
+      case Value.ListValue(values)   =>
         values.map(renderValue).mkString("[", ", ", "]")
-      case net.andimiller.torpor.core.Value.ObjectValue(fields) =>
+      case Value.ObjectValue(fields) =>
         fields.map { case (name, v) => s"$name: ${renderValue(v)}" }.mkString("{", ", ", "}")
-      case net.andimiller.torpor.core.Value.VariableValue(n)    => "$" + n
+      case Value.VariableValue(n)    => "$" + n
     }
 
   private def kindOf(schema: Schema, name: String): String =

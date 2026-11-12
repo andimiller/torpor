@@ -1,7 +1,7 @@
 package net.andimiller.torpor.source
 
 import cats.effect.IO
-import io.circe.Decoder
+import io.circe.{Decoder, Json}
 import net.andimiller.torpor.core.{Argument, Resolver, Value}
 import net.andimiller.torpor.macros.schema
 
@@ -9,7 +9,7 @@ final class RootResolverSuite extends munit.CatsEffectSuite {
 
   private val pets = schema"""extend type Query { pets(species: String, first: Int): [String!]! }""".Query.pets
 
-  private def run(resolver: FieldResolver[IO, ?], arguments: Argument*): IO[io.circe.Json] =
+  private def run(resolver: FieldResolver[IO, ?], arguments: Argument*): IO[Json] =
     resolver.entry match {
       case (_, Resolver.Root(run)) => run(arguments.toList)
       case (coordinate, other)     => IO(fail(s"${coordinate.render} registered $other, not a root resolver"))
