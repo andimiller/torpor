@@ -1,5 +1,7 @@
 package net.andimiller.torpor.schema
 
+export net.andimiller.torpor.core.TypeRef
+
 /** One SDL fragment and the id of the source that serves it. */
 final case class SdlFragment(source: String, sdl: String)
 
@@ -12,30 +14,15 @@ enum TypeKind(val label: String) {
   case ScalarType extends TypeKind("scalar")
 }
 
-enum TypeRef {
-  case Named(name: String)
-  case ListOf(of: TypeRef)
-  case NonNull(of: TypeRef)
-
-  /** The type name at the bottom of any list/non-null wrappers. */
-  def named: String = this match {
-    case Named(name) => name
-    case ListOf(of)  => of.named
-    case NonNull(of) => of.named
-  }
-
-  def isNonNull: Boolean = this match {
-    case NonNull(_) => true
-    case _          => false
-  }
-}
-
 final case class InputValueDef(
     name: String,
     tpe: TypeRef,
-    hasDefault: Boolean = false,
+    /** The SDL default, kept as a literal so it can fill omitted arguments and be printed by introspection. */
+    default: Option[net.andimiller.torpor.core.Value] = None,
     description: Option[String] = None
-)
+) {
+  def hasDefault: Boolean = default.isDefined
+}
 
 final case class FieldDef(
     name: String,
@@ -46,7 +33,16 @@ final case class FieldDef(
     /** True when the field arrived through `extend type`, which means a resolver serves it and the planner must give it
       * its own node. Fields declared in the type definition are returned by whatever produced the value.
       */
-    fromExtension: Boolean = false
+    fromExtension: Boolean = false,
+    deprecationReason: Option[String] = None,
+    /** The SDL default of an input-object field; unused for output fields. */
+    defaultValue: Option[net.andimiller.torpor.core.Value] = None
+)
+
+final case class EnumValueDef(
+    name: String,
+    description: Option[String] = None,
+    deprecationReason: Option[String] = None
 )
 
 final case class TypeDef(
@@ -56,8 +52,10 @@ final case class TypeDef(
     fields: List[FieldDef],
     interfaces: List[String],
     unionMembers: List[String],
-    enumValues: List[String],
-    origin: Origin
+    enumValues: List[EnumValueDef],
+    origin: Origin,
+    /** `@specifiedBy(url: …)` on a custom scalar. */
+    specifiedByUrl: Option[String] = None
 )
 
 object TypeDef {

@@ -93,6 +93,19 @@ export net.andimiller.torpor.core.{Arguments, Scalar}
   */
 object resolver {
 
+  /** Union and interface members have to say which type they are. `base` is the encoder the value would otherwise use;
+    * the result carries `__typename` for the planner's fragments to select on.
+    *
+    * {{{
+    * given Encoder[Expression] = resolver.tagged(deriveEncoder[Expression]) {
+    *   case _: And  => "And"
+    *   case _: Leaf => "Leaf"
+    * }
+    * }}}
+    */
+  def tagged[V](base: Encoder[V])(tag: V => String): Encoder[V] =
+    Encoder.instance(value => base(value).mapObject(_.add("__typename", Json.fromString(tag(value)))))
+
   /** A root field. The lambda's `args` is typed from the SDL's arguments: `resolver.root[IO](sdl.Query.character) {
     * args => args.id … }`; `.args[A]` decodes them as `A` instead.
     */
@@ -160,12 +173,14 @@ object resolver {
   def field[F[_]]: FieldStart[F] = new FieldStart[F]
 
   final class FieldStart[F[_]] {
-    def apply[T <: String, N <: String, A, R <: String](coordinate: FieldCoordinate.Of[T, N, A, R]): Field[F, T, N, R] =
+    def apply[T <: String, N <: String, A, R <: String](
+        coordinate: FieldCoordinate.Of[T, N, A, R]
+    ): Field[F, T, N, A, R] =
       new Field(coordinate)
   }
 
-  final class Field[F[_], T <: String, N <: String, R <: String](coordinate: FieldCoordinate) {
-    def key[P, K](extract: P => K): KeyedField[F, T, N, R, P, K] = new KeyedField(coordinate, extract)
+  final class Field[F[_], T <: String, N <: String, A, R <: String](coordinate: FieldCoordinate) {
+    def key[P, K](extract: P => K): KeyedField[F, T, N, A, R, P, K] = new KeyedField(coordinate, extract)
   }
 
   /** A keyed field both consumes its parent and produces its own values, which are the next level's parents.
@@ -173,18 +188,31 @@ object resolver {
     * The batch signature is `NonEmptyList[K] => F[Map[K, V]]`: there is deliberately no single-key overload, because
     * its absence is what makes N+1 impossible to write by accident.
     */
-  final class KeyedField[F[_], T <: String, N <: String, R <: String, P, K](
+  final class KeyedField[F[_], T <: String, N <: String, A, R <: String, P, K](
       coordinate: FieldCoordinate,
       extract: P => K
   ) {
-    def batch[V](run: NonEmptyList[K] => F[Map[K, V]])(using
+
+    /** The batch receives the field's arguments once, plus the keys of every parent in the node, so a paginated field
+      * makes one call for `cohorts(first: 2)` rather than one per workspace.
+      */
+    inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
         Applicative[F],
         Decoder[P],
         Encoder[K],
         Decoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
-      FieldResolver(keyedEntry(coordinate, extract, run))
+      FieldResolver(
+        keyedEntry[F, A, P, K, V](coordinate, extract, run)(using
+          summon[Applicative[F]],
+          Arguments.decoder[A],
+          summon[Decoder[P]],
+          summon[Encoder[K]],
+          summon[Decoder[K]],
+          summon[Encoder[V]]
+        )
+      )
   }
 
   /** A keyed field whose key may be absent (a nullable foreign key). Absent keys are never sent to `batch`; they
@@ -195,27 +223,36 @@ object resolver {
   final class OptionalFieldStart[F[_]] {
     def apply[T <: String, N <: String, A, R <: String](
         coordinate: FieldCoordinate.Of[T, N, A, R]
-    ): OptionalField[F, T, N, R] =
+    ): OptionalField[F, T, N, A, R] =
       new OptionalField(coordinate)
   }
 
-  final class OptionalField[F[_], T <: String, N <: String, R <: String](coordinate: FieldCoordinate) {
-    def key[P, K](extract: P => Option[K]): OptionalKeyedField[F, T, N, R, P, K] =
+  final class OptionalField[F[_], T <: String, N <: String, A, R <: String](coordinate: FieldCoordinate) {
+    def key[P, K](extract: P => Option[K]): OptionalKeyedField[F, T, N, A, R, P, K] =
       new OptionalKeyedField(coordinate, extract)
   }
 
-  final class OptionalKeyedField[F[_], T <: String, N <: String, R <: String, P, K](
+  final class OptionalKeyedField[F[_], T <: String, N <: String, A, R <: String, P, K](
       coordinate: FieldCoordinate,
       extract: P => Option[K]
   ) {
-    def batch[V](run: NonEmptyList[K] => F[Map[K, V]])(using
+    inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
         Applicative[F],
         Decoder[P],
         Encoder[K],
         Decoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
-      FieldResolver(optionalKeyedEntry(coordinate, extract, run))
+      FieldResolver(
+        optionalKeyedEntry[F, A, P, K, V](coordinate, extract, run)(using
+          summon[Applicative[F]],
+          Arguments.decoder[A],
+          summon[Decoder[P]],
+          summon[Encoder[K]],
+          summon[Decoder[K]],
+          summon[Encoder[V]]
+        )
+      )
   }
 
   // the erased resolvers the executor runs
@@ -262,10 +299,10 @@ object resolver {
     )
   }
 
-  private def keyedEntry[F[_]: Applicative, P: Decoder, K: Encoder: Decoder, V: Encoder](
+  private def keyedEntry[F[_]: Applicative, A: Decoder, P: Decoder, K: Encoder: Decoder, V: Encoder](
       coordinate: FieldCoordinate,
       extract: P => K,
-      run: NonEmptyList[K] => F[Map[K, V]]
+      run: (A, NonEmptyList[K]) => F[Map[K, V]]
   ): (FieldCoordinate, Resolver[F]) =
     coordinate -> Resolver.Batch(
       key = value =>
@@ -273,14 +310,15 @@ object resolver {
           case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
           case Right(p)    => Right(keyString(extract(p)))
         },
-      batch = keys =>
-        run(keys.map(decodeKey[K](coordinate, _))).map(_.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) })
+      batch = (arguments, keys) =>
+        run(decodeArguments[A](coordinate, arguments), keys.map(decodeKey[K](coordinate, _)))
+          .map(_.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) })
     )
 
-  private def optionalKeyedEntry[F[_]: Applicative, P: Decoder, K: Encoder: Decoder, V: Encoder](
+  private def optionalKeyedEntry[F[_]: Applicative, A: Decoder, P: Decoder, K: Encoder: Decoder, V: Encoder](
       coordinate: FieldCoordinate,
       extract: P => Option[K],
-      run: NonEmptyList[K] => F[Map[K, V]]
+      run: (A, NonEmptyList[K]) => F[Map[K, V]]
   ): (FieldCoordinate, Resolver[F]) =
     coordinate -> Resolver.Batch(
       key = value =>
@@ -288,18 +326,29 @@ object resolver {
           case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
           case Right(p)    => Right(extract(p).fold(AbsentKey)(keyString(_)))
         },
-      batch = keys => {
+      batch = (arguments, keys) => {
+        val decoded = decodeArguments[A](coordinate, arguments)
         val present = keys.toList.filterNot(_ == AbsentKey).distinct
         NonEmptyList.fromList(present) match {
           case None      => Applicative[F].pure(Map(AbsentKey -> Json.Null))
           case Some(nel) =>
-            run(nel.map(decodeKey[K](coordinate, _)))
+            run(decoded, nel.map(decodeKey[K](coordinate, _)))
               .map(results =>
                 results.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) } + (AbsentKey -> Json.Null)
               )
         }
       }
     )
+
+  private def decodeArguments[A: Decoder](
+      coordinate: FieldCoordinate,
+      arguments: List[net.andimiller.torpor.core.Argument]
+  ): A =
+    Decoder[A].decodeJson(argumentsJson(arguments)) match {
+      case Left(error)    =>
+        throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
+      case Right(decoded) => decoded
+    }
 
   private def keyString[K: Encoder](key: K): String = Encoder[K].apply(key).noSpaces
 

@@ -65,7 +65,7 @@ val charactersSource = Source[IO]("characters", characters)(
 val universeSource = Source[IO]("universe", universe)(
   resolver.field[IO](universe.Character.corporation)
     .key((character: EsiCharacter) => character.corporationId)
-    .batch((ids: NonEmptyList[Long]) => esi.corporations(ids))
+    .batch((_, ids: NonEmptyList[Long]) => esi.corporations(ids))
 )
 
 // 5. Assemble. Each source's type records which fields its SDL needs resolved and what its resolvers produce and
@@ -123,19 +123,25 @@ Works today:
 | SDL | per-source fragments, `extend` across sources, merge with typed errors carrying `source:line:column` |
 | Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile; root resolver arguments typed from the SDL) and `sdl"""…"""` (text only); assembling sources checks that each source resolves exactly the fields its SDL requires, and that every keyed field's parent type has the fields it reads |
 | Validation | a documented subset of the spec's rules; unsupported constructs fail loudly |
-| Planner | query → DAG of batch calls, normalised selection sets, variables substituted to literals |
+| Planner | query → DAG of batch calls, normalised selection sets, variables substituted to literals, SDL defaults filled, input values coerced |
+| Batched arguments | every field's arguments are typed from the SDL and reach the batch once per argument set (`cohorts(first: 2)` is one call for every parent in that node) |
+| Union/interface planning | inline and named fragments with type conditions, `__typename` anywhere; a resolver tags a member with `resolver.tagged` or its own `__typename` |
+| Null bubbling | a null in a non-null position nulls the nearest nullable ancestor and keeps the error at the original path |
 | Executor | one call per node per level, errors as values with response paths, alias-keyed assembly |
+| Hooks | `Hooks[F]`: per-node spans and timing, slow-query log, per-batch authorization, one global error mapper (`INVALID_INPUT` for arguments the client got wrong) |
 | Limits | `maxDepth`, `maxFields`, coverage check (at compile time, and again at startup) |
 | Durable runs | suspend/resume, `SnapshotStore` (in-memory, and Postgres via skunk) with `claim` |
-| HTTP | `POST /graphql`, GraphQL errors as 200s |
-| Tools | introspection (`__schema`, `__type`), `Explain.mermaid` / `Explain.report` |
+| HTTP | `POST /graphql`, GraphQL errors as 200s; a `Request[F] => F[Unit]` setup hook for per-request context (`IOLocal`) |
+| Tools | introspection (`__schema`, `__type`) with unions, interfaces, inputs, scalars, defaults and deprecations, `Explain.mermaid` / `Explain.report` |
+| Relay | `torpor-relay`: `Connection[A]`, `PageInfo`, `PageArgs` and one slicing function for `first/after/last/before` |
 
 Not built yet — do not assume these work:
 
 - `@defer`/`@stream`, SSE, a resume endpoint (M2). A suspended run is currently usable programmatically only.
-- Null bubbling, full value coercion, subtype/interface planning (`__typename` is rejected in normal queries).
-- Subscriptions. Keyed (batch) fields cannot suspend. Node timeouts, cost metrics.
+- Subscriptions. Keyed (batch) fields cannot suspend. Node timeouts, cost metrics, a per-run cross-level result cache.
+- Full spec value coercion for custom scalars: a custom scalar's input decoding is whatever `Decoder` its `Scalar` binding names.
 - Postgres store integration tests (it compiles; the CAS contract is proven against the in-memory store).
+- Scala 2.13. The typed API is `inline`, match types, opaque types and macros; a 2.13 service talks to torpor over HTTP.
 
 ## What it is not
 
@@ -157,7 +163,8 @@ Not built yet — do not assume these work:
 | `torpor-source` | planner, resolver DSL, `Torpor` facade, `Durable` |
 | `torpor-snapshot` | snapshot codecs, `SnapshotStore` (in-memory + skunk) |
 | `torpor-explain` | mermaid plan, per-level call report |
-| `torpor-http` | http4s routes |
+| `torpor-relay` | Relay `Connection`/`PageInfo` slicing, no core change |
+| `torpor-http` | http4s routes, per-request context setup |
 | `torpor-testkit` | golden test for the merged contract: sources in, one `.graphqls` out, a diff if it drifts |
 
 Only `torpor-schema` may import `sangria.*` (the parser); `scripts/check-imports.sh` enforces it.

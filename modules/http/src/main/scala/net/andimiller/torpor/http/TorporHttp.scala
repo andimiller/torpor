@@ -16,7 +16,17 @@ import org.http4s.dsl.Http4sDsl
   */
 object TorporHttp {
 
-  def routes[F[_]: Concurrent](torpor: Torpor[F], schema: Schema): HttpRoutes[F] = {
+  def routes[F[_]: Concurrent](torpor: Torpor[F], schema: Schema): HttpRoutes[F] =
+    routes(torpor, schema, (_: Request[F]) => Concurrent[F].unit)
+
+  /** `setup` runs before the query, so a request can put its caller into an `IOLocal` that resolvers read. That is the
+    * one blessed way to give resolvers a request context; nothing is threaded through `Torpor`.
+    */
+  def routes[F[_]: Concurrent](
+      torpor: Torpor[F],
+      schema: Schema,
+      setup: Request[F] => F[Unit]
+  ): HttpRoutes[F] = {
     val dsl = new Http4sDsl[F] {}
     import dsl._
 
@@ -47,7 +57,7 @@ object TorporHttp {
     }
 
     HttpRoutes.of[F] { case req @ POST -> Root / "graphql" =>
-      req.as[Json].attempt.flatMap {
+      setup(req) *> req.as[Json].attempt.flatMap {
         case Left(_)     => BadRequest(errorJson(List("request body must be JSON")))
         case Right(body) => respond(body)
       }

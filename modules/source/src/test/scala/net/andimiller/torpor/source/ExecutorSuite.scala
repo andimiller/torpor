@@ -45,7 +45,7 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
 
   private val ownersSdl =
     schema"""type Owner { id: ID! name: String! email: String! }
-      |extend type Pet { owner: Owner! }
+      |extend type Pet { owner: Owner }
       |"""
 
   private val reportsSdl =
@@ -60,7 +60,11 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
     val ownersKeys = new AtomicInteger(0)
   }
 
-  private final class Fixture(ownersFail: Boolean = false, omitOwner: Option[OwnerId] = None) {
+  private final class Fixture(
+      ownersFail: Boolean = false,
+      ownersThrow: Boolean = false,
+      omitOwner: Option[OwnerId] = None
+  ) {
     val calls = new Calls
 
     private val petsSource = Source[IO]("pets", petsSdl)(
@@ -76,7 +80,8 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
       resolver
         .field[IO](ownersSdl.Pet.owner)
         .key((pet: Pet) => pet.ownerId)
-        .batch { (keys: NonEmptyList[OwnerId]) =>
+        .batch { (_, keys: NonEmptyList[OwnerId]) =>
+          if (ownersThrow) throw new RuntimeException("owners service unavailable")
           IO {
             calls.owners.incrementAndGet()
             calls.ownersKeys.set(keys.size)
@@ -183,7 +188,7 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
         List(PathSegment.Field("pets"), PathSegment.Index(0), PathSegment.Field("owner"))
       )
       assertEquals(response.errors.toList.head.code, FieldError.UpstreamUnavailable)
-      assert(response.errors.toList.head.message.contains("owners service unavailable"))
+      assertEquals(response.errors.toList.head.message, "internal error", "the default mapper hides host details")
 
       // spec-shaped response: data and errors side by side
       val json = response.toJson
@@ -222,16 +227,28 @@ final class ExecutorSuite extends munit.CatsEffectSuite {
   }
 
   test("a resolver that throws synchronously becomes a field error, not a failed run") {
-    val fixture = new Fixture
-    // `first` will not decode as Int, so the DSL throws while building the effect: the boundary must catch it
-    fixture.execute("""{ pets(first: "not-a-number") { name } }""").map { response =>
-      assert(response.data.hcursor.downField("pets").focus.contains(Json.Null))
-      assertEquals(response.errors.toList.size, 1)
-      assert(
-        response.errors.toList.head.message.contains("cannot decode arguments"),
-        response.errors.toList.head.message
+    val fixture = new Fixture(ownersThrow = true)
+    // the batch throws while building its effect, so the executor's boundary must catch it
+    fixture.execute("{ pets { name owner { name } } }").map { response =>
+      val errors = response.errors.toList
+      assertEquals(errors.size, 3, "one error per pet position")
+      assertEquals(errors.head.code, FieldError.UpstreamUnavailable)
+      assertEquals(errors.head.message, "internal error")
+      assertEquals(
+        errors.head.path,
+        List(PathSegment.Field("pets"), PathSegment.Index(0), PathSegment.Field("owner"))
       )
-      assertEquals(response.errors.toList.head.code, FieldError.UpstreamUnavailable)
+      assert(response.errors.toList.forall(_.code == FieldError.UpstreamUnavailable))
+      // the pets themselves still resolved: a node failure is not a run failure
+      assertEquals(response.data.hcursor.downField("pets").downArray.get[String]("name").toOption, Some("Rex"))
+    }
+  }
+
+  test("an argument that does not coerce is a request error, not a resolver failure") {
+    val fixture = new Fixture
+    fixture.torpor.query(fixture.schema, """{ pets(first: "not-a-number") { name } }""") match {
+      case Left(error) => assert(error.render.exists(_.contains("is an Int")))
+      case Right(_)    => fail("expected a planning error")
     }
   }
 

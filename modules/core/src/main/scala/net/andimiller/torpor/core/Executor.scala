@@ -14,11 +14,15 @@ import net.andimiller.hedgehogs.dag.visitor.{DagVisitor, SimpleDagVisitor}
   * This is the non-durable path: a suspending resolver is an error here, because nothing is persisted to resume from.
   * Use `Durable` for runs that can suspend.
   */
-final class Executor[F[_]: Concurrent](plan: Plan, resolverFor: (String, FieldCoordinate) => Option[Resolver[F]]) {
+final class Executor[F[_]: Concurrent](
+    plan: Plan,
+    resolverFor: (String, FieldCoordinate) => Option[Resolver[F]],
+    hooks: Hooks[F]
+) {
 
   def run: F[Response] = {
     val rootKeys: Map[NodeId, String] =
-      plan.roots.selections.collect { case NodeField(responseKey, _, id) => id -> responseKey }.toMap
+      plan.roots.selections.collect { case NodeField(responseKey, _, id, _, _) => id -> responseKey }.toMap
 
     val graph                         = plan.nodes.foldLeft(DataGraph.empty[NodeId, PlanNode, Unit]) { (acc, node) =>
       node.dependencies.foldLeft(acc.addNode(node.id, node)) { (withNode, dependency) =>
@@ -37,7 +41,7 @@ final class Executor[F[_]: Concurrent](plan: Plan, resolverFor: (String, FieldCo
             )
           case Some(resolver) =>
             NodeRuntime
-              .run(plan, node, node.dependencies.headOption.flatMap(inputs.get), resolver, rootKeys.get(node.id))
+              .run(plan, node, node.dependencies.headOption.flatMap(inputs.get), resolver, rootKeys.get(node.id), hooks)
               .flatMap {
                 case NodeOutcome.Completed(result) => result.pure[F]
                 case NodeOutcome.Suspended(_)      =>

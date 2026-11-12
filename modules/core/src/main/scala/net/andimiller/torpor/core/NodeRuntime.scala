@@ -5,6 +5,8 @@ import cats.effect.Concurrent
 import cats.syntax.all._
 import io.circe.Json
 
+import scala.concurrent.duration.*
+
 /** What one visit to a node produced: a result, or a suspension handle. */
 enum NodeOutcome {
   case Completed(result: NodeResult)
@@ -21,18 +23,35 @@ object NodeRuntime {
       node: PlanNode,
       parent: Option[NodeResult],
       resolver: Resolver[F],
-      rootKey: Option[String]
-  ): F[NodeOutcome] =
-    // Boundary: `defer` moves construction of the resolver's F inside the effect, so a synchronous throw (the DSL
-    // throws when arguments or keys do not decode) becomes a field error instead of escaping into hedgehogs' fail-fast
-    // segment, which would cancel in-flight fibers and lose the snapshot.
-    try
-      execute(plan, node, parent, resolver, rootKey)
-        .handleErrorWith(t => Concurrent[F].pure(NodeOutcome.Completed(upstreamFailure(pathOf(rootKey), t))))
-    catch {
-      // A synchronous throw happens while the resolver's effect is being built; catching it here keeps hedgehogs' fair
-      // catch clause honest (it must never see a raised node).
-      case t: Throwable => Concurrent[F].pure(NodeOutcome.Completed(upstreamFailure(pathOf(rootKey), t)))
+      rootKey: Option[String],
+      hooks: Hooks[F]
+  ): F[NodeOutcome] = {
+    val path = pathOf(rootKey)
+
+    // Boundary: a synchronous throw happens while the resolver's effect is being built (the DSL throws when arguments
+    // or keys do not decode); catching it here keeps hedgehogs' fair catch clause honest.
+    try {
+      val started = System.nanoTime()
+      hooks
+        .nodeSpan(node.field, node.level)
+        .surround {
+          execute(plan, node, parent, resolver, rootKey, path, hooks)
+            .flatMap(outcome => hooks.onNode(node.field, node.level, (System.nanoTime() - started).nanos).as(outcome))
+        }
+        .handleErrorWith(t => failure(hooks, node.field, path, t).map(NodeOutcome.Completed(_)))
+    } catch {
+      case t: Throwable => failure(hooks, node.field, path, t).map(NodeOutcome.Completed(_))
+    }
+  }
+
+  private def failure[F[_]: Concurrent](
+      hooks: Hooks[F],
+      coordinate: FieldCoordinate,
+      path: List[PathSegment],
+      t: Throwable
+  ): F[NodeResult] =
+    hooks.onError(coordinate, t).map { error =>
+      NodeResult(List(path -> Json.Null), Chain.one(FieldError(error.message, path, error.code)))
     }
 
   private def execute[F[_]: Concurrent](
@@ -40,22 +59,34 @@ object NodeRuntime {
       node: PlanNode,
       parent: Option[NodeResult],
       resolver: Resolver[F],
-      rootKey: Option[String]
+      rootKey: Option[String],
+      path: List[PathSegment],
+      hooks: Hooks[F]
   ): F[NodeOutcome] =
     resolver match {
       case Resolver.Suspending(start, _) =>
-        start(node.args).attempt.map {
+        start(node.args).attempt.flatMap {
           case Right(Step.Complete(json))  =>
-            NodeOutcome.Completed(NodeResult(List(pathOf(rootKey) -> json), Chain.empty))
-          case Right(Step.Suspend(handle)) => NodeOutcome.Suspended(handle)
-          case Left(t)                     =>
-            NodeOutcome.Completed(upstreamFailure(pathOf(rootKey), t))
+            Concurrent[F].pure(NodeOutcome.Completed(NodeResult(List(path -> json), Chain.empty)))
+          case Right(Step.Suspend(handle)) => Concurrent[F].pure(NodeOutcome.Suspended(handle))
+          case Left(t)                     => failure(hooks, node.field, path, t).map(NodeOutcome.Completed(_))
         }
 
       case Resolver.Root(run) =>
-        run(node.args).attempt.map {
-          case Right(json) => NodeOutcome.Completed(NodeResult(List(pathOf(rootKey) -> json), Chain.empty))
-          case Left(t)     => NodeOutcome.Completed(upstreamFailure(pathOf(rootKey), t))
+        run(node.args).attempt.flatMap {
+          case Left(t)     => failure(hooks, node.field, path, t).map(NodeOutcome.Completed(_))
+          case Right(json) =>
+            // `""` is the root key: a root node produces one value, and the hook map is keyed like a batch.
+            authorize(hooks, node, Map(RootKey -> json)).map { verdicts =>
+              verdicts.get(RootKey) match {
+                case Some(Left(error))  =>
+                  NodeOutcome.Completed(denied(path, error))
+                case Some(Right(value)) =>
+                  NodeOutcome.Completed(NodeResult(List(path -> value), Chain.empty))
+                case None               =>
+                  NodeOutcome.Completed(NodeResult(List(path -> json), Chain.empty))
+              }
+            }
         }
 
       case Resolver.Batch(key, batch) =>
@@ -71,42 +102,71 @@ object NodeRuntime {
               }
           }
 
-        val keys                                       = extracted.collect { case (_, Right(Some(k))) => k }.distinct
-        val call: F[Either[String, Map[String, Json]]] = NonEmptyList.fromList(keys) match {
-          case None      => Concurrent[F].pure(Right(Map.empty[String, Json]))
-          case Some(nel) => batch(nel).attempt.map(_.left.map(t => Option(t.getMessage).getOrElse(t.toString)))
-        }
+        val keys                                          = extracted.collect { case (_, Right(Some(k))) => k }.distinct
+        val call: F[Either[Throwable, Map[String, Json]]] =
+          try
+            NonEmptyList.fromList(keys) match {
+              case None      => Concurrent[F].pure(Right(Map.empty[String, Json]))
+              case Some(nel) => batch(node.args, nel).attempt
+            }
+          catch {
+            // a batch that throws while building its effect (rather than inside it)
+            case t: Throwable => Concurrent[F].pure(Left(t))
+          }
 
-        call.map {
-          case Left(message) =>
-            NodeOutcome.Completed(
-              NodeResult(
-                extracted.map { case (path, _) => path -> Json.Null },
-                Chain.fromSeq(extracted.map { case (path, _) =>
-                  FieldError(message, path, FieldError.UpstreamUnavailable)
-                })
+        call.flatMap {
+          case Left(t) =>
+            hooks.onError(node.field, t).map { error =>
+              NodeOutcome.Completed(
+                NodeResult(
+                  extracted.map { case (path, _) => path -> Json.Null },
+                  Chain.fromSeq(extracted.map { case (path, _) => FieldError(error.message, path, error.code) })
+                )
               )
-            )
+            }
 
           case Right(results) =>
-            val values: List[(List[PathSegment], Json, Chain[FieldError])] = extracted.map {
-              case (path, Left(error))    => (path, Json.Null, Chain.one(error))
-              case (path, Right(None))    => (path, Json.Null, Chain.empty[FieldError])
-              case (path, Right(Some(k))) =>
-                results.get(k) match {
-                  case Some(json) => (path, json, Chain.empty[FieldError])
-                  case None       =>
-                    (path, Json.Null, Chain.one(FieldError(s"no result for key '$k'", path, FieldError.MissingKey)))
-                }
-            }
-            NodeOutcome.Completed(
-              NodeResult(
-                values.map { case (path, json, _) => path -> json },
-                values.foldLeft(Chain.empty[FieldError]) { case (acc, (_, _, errs)) => acc ++ errs }
+            authorize(hooks, node, results).map { verdicts =>
+              val values: List[(List[PathSegment], Json, Chain[FieldError])] = extracted.map {
+                case (path, Left(error))    => (path, Json.Null, Chain.one(error))
+                case (path, Right(None))    => (path, Json.Null, Chain.empty[FieldError])
+                case (path, Right(Some(k))) =>
+                  verdicts.get(k) match {
+                    case Some(Left(error))  => (path, Json.Null, Chain.one(FieldError(error.message, path, error.code)))
+                    case Some(Right(value)) => (path, value, Chain.empty[FieldError])
+                    case None               =>
+                      results.get(k) match {
+                        case Some(json) => (path, json, Chain.empty[FieldError])
+                        case None       =>
+                          (
+                            path,
+                            Json.Null,
+                            Chain.one(FieldError(s"no result for key '$k'", path, FieldError.MissingKey))
+                          )
+                      }
+                  }
+              }
+              NodeOutcome.Completed(
+                NodeResult(
+                  values.map { case (path, json, _) => path -> json },
+                  values.foldLeft(Chain.empty[FieldError]) { case (acc, (_, _, errs)) => acc ++ errs }
+                )
               )
-            )
+            }
         }
     }
+
+  private val RootKey = ""
+
+  private def authorize[F[_]: Concurrent](
+      hooks: Hooks[F],
+      node: PlanNode,
+      values: Map[String, Json]
+  ): F[Map[String, Either[HookError, Json]]] =
+    if (values.isEmpty) Concurrent[F].pure(Map.empty) else hooks.authorize(node.field, node.args, values)
+
+  private def denied(path: List[PathSegment], error: HookError): NodeResult                           =
+    NodeResult(List(path -> Json.Null), Chain.one(FieldError(error.message, path, error.code)))
 
   /** Where this node's values sit inside its parent's output. Deterministic, so execution and assembly agree. */
   def inputPositions(plan: Plan, node: PlanNode, parent: NodeResult): List[(List[PathSegment], Json)] =
@@ -120,7 +180,8 @@ object NodeRuntime {
 
   /** Positions of a specific child node's parent values, in response order. Inline fields only contribute a path
     * prefix; only the matching `NodeField` yields values, otherwise sibling scalars would be mistaken for parent
-    * values.
+    * values. A selection that only applies to some concrete types (a fragment on a union member) yields nothing for the
+    * other types.
     */
   def childPositions(
       value: Json,
@@ -136,24 +197,22 @@ object NodeRuntime {
       case None if value.isNull => Nil
       case None                 =>
         selectionSet.selections.flatMap {
-          case InlineField(responseKey, field, selections)    =>
+          case InlineField(responseKey, field, selections, _, _)                                         =>
             childPositions(member(value, field), selections, path :+ PathSegment.Field(responseKey), childId)
-          case NodeField(responseKey, _, id) if id == childId =>
-            // The key comes from the enclosing parent value, never from the parent's data for this field.
+          case NodeField(responseKey, _, id, _, appliesTo) if id == childId && applies(appliesTo, value) =>
+            // The key comes from the enclosing parent value, never from the parent's data for that field.
             List((path :+ PathSegment.Field(responseKey)) -> value)
-          case NodeField(_, _, _)                             => Nil
+          case _                                                                                         => Nil
         }
     }
+
+  /** A selection with an empty `appliesTo` applies to every type; otherwise its `__typename` must be listed. */
+  def applies(appliesTo: List[String], value: Json): Boolean =
+    appliesTo.isEmpty || member(value, "__typename").asString.exists(appliesTo.contains)
 
   /** A root node's response path, supplied from `Plan.roots` so errors carry an absolute path. */
   private def pathOf(rootKey: Option[String]): List[PathSegment] =
     rootKey.map(key => List(PathSegment.Field(key))).getOrElse(Nil)
-
-  private def upstreamFailure(path: List[PathSegment], t: Throwable): NodeResult =
-    NodeResult(
-      List(path -> Json.Null),
-      Chain.one(FieldError(Option(t.getMessage).getOrElse(t.toString), path, FieldError.UpstreamUnavailable))
-    )
 
   def member(value: Json, field: String): Json =
     value.asObject.flatMap(_(field)).getOrElse(Json.Null)

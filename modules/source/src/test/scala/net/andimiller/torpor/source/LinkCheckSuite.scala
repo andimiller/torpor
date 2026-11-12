@@ -23,7 +23,7 @@ object LinkedPets {
     resolver
       .field[IO](owners.Pet.owner)
       .key((pet: LinkedPet) => pet.ownerId)
-      .batch((ids: NonEmptyList[String]) => IO.pure(ids.toList.map(id => id -> LinkedOwner(id, "Ada")).toMap))
+      .batch((_, ids: NonEmptyList[String]) => IO.pure(ids.toList.map(id => id -> LinkedOwner(id, "Ada")).toMap))
   )
 }
 
@@ -59,7 +59,7 @@ final class LinkCheckSuite extends munit.CatsEffectSuite {
       resolver
         .field[IO](owners.Pet.owner)
         .key((parent: HasOwner) => parent.ownerId)
-        .batch((ids: NonEmptyList[String]) => IO.pure(ids.toList.map(id => id -> LinkedOwner(id, "Ada")).toMap))
+        .batch((_, ids: NonEmptyList[String]) => IO.pure(ids.toList.map(id => id -> LinkedOwner(id, "Ada")).toMap))
     )
 
     Torpor[IO](petsSource, narrow)

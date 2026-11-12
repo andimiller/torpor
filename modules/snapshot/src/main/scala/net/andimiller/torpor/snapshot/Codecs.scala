@@ -90,20 +90,61 @@ object Codecs {
       (values, c.get[List[FieldError]]("errors")).mapN((v, e) => NodeResult(v, Chain.fromSeq(e)))
     }
 
+  implicit val typeRefEncoder: Encoder[TypeRef] = Encoder.instance {
+    case TypeRef.Named(name) => Json.obj("named" := name)
+    case TypeRef.ListOf(of)  => Json.obj("list" := typeRefEncoder(of))
+    case TypeRef.NonNull(of) => Json.obj("nonNull" := typeRefEncoder(of))
+  }
+  implicit val typeRefDecoder: Decoder[TypeRef] = Decoder.instance { c =>
+    c.get[String]("named")
+      .map(TypeRef.Named(_))
+      .orElse(c.get[TypeRef]("list").map(TypeRef.ListOf(_)))
+      .orElse(c.get[TypeRef]("nonNull").map(TypeRef.NonNull(_)))
+  }
+
   implicit val selectionEncoder: Encoder[Selection]       = Encoder.instance {
-    case InlineField(responseKey, field, selections) =>
-      Json.obj("kind" := "inline", "responseKey" := responseKey, "field" := field, "selections" := selections.asJson)
-    case NodeField(responseKey, field, node)         =>
-      Json.obj("kind" := "node", "responseKey" := responseKey, "field" := field, "node" := node.asJson)
+    case InlineField(responseKey, field, selections, tpe, appliesTo) =>
+      Json.obj(
+        "kind"        := "inline",
+        "responseKey" := responseKey,
+        "field"       := field,
+        "selections"  := selections.asJson,
+        "tpe"         := tpe,
+        "appliesTo"   := appliesTo
+      )
+    case NodeField(responseKey, field, node, tpe, appliesTo)         =>
+      Json.obj(
+        "kind"        := "node",
+        "responseKey" := responseKey,
+        "field"       := field,
+        "node"        := node.asJson,
+        "tpe"         := tpe,
+        "appliesTo"   := appliesTo
+      )
+    case TypeNameField(responseKey, staticName)                      =>
+      Json.obj("kind" := "typename", "responseKey" := responseKey, "staticName" := staticName)
   }
   implicit val selectionDecoder: Decoder[Selection]       = Decoder.instance { c =>
     c.get[String]("kind").flatMap {
-      case "inline" =>
-        (c.get[String]("responseKey"), c.get[String]("field"), c.get[SelectionSet]("selections"))
-          .mapN(InlineField(_, _, _))
-      case "node"   =>
-        (c.get[String]("responseKey"), c.get[String]("field"), c.get[NodeId]("node")).mapN(NodeField(_, _, _))
-      case other    => Left(DecodingFailure(s"unknown selection kind $other", c.history))
+      case "inline"   =>
+        (
+          c.get[String]("responseKey"),
+          c.get[String]("field"),
+          c.get[SelectionSet]("selections"),
+          c.get[TypeRef]("tpe"),
+          c.getOrElse[List[String]]("appliesTo")(Nil)
+        ).mapN(InlineField.apply)
+      case "node"     =>
+        (
+          c.get[String]("responseKey"),
+          c.get[String]("field"),
+          c.get[NodeId]("node"),
+          c.get[TypeRef]("tpe"),
+          c.getOrElse[List[String]]("appliesTo")(Nil)
+        ).mapN(NodeField.apply)
+      case "typename" =>
+        (c.get[String]("responseKey"), c.get[String]("staticName")).mapN(TypeNameField.apply)
+      case other      => Left(DecodingFailure(s"unknown selection kind $other", c.history))
     }
   }
   implicit val selectionSetEncoder: Encoder[SelectionSet] = Encoder[SelectionSet](ss => ss.selections.asJson)

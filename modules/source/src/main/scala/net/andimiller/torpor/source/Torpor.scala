@@ -3,8 +3,11 @@ package net.andimiller.torpor.source
 import cats.data.NonEmptyChain
 import cats.data.Chain
 import cats.effect.Concurrent
+import cats.syntax.all._
 import io.circe.Json
-import net.andimiller.torpor.core.{Executor, FieldCoordinate, Plan, Resolver, Response, Value}
+import net.andimiller.torpor.core.{Executor, FieldCoordinate, Hooks, Plan, Resolver, Response, Value}
+
+import scala.concurrent.duration.*
 import net.andimiller.torpor.schema.{Executable, Introspection, Schema, SdlFragment, ValidationError}
 
 /** Everything that stopped a service from starting: merge errors, then coverage errors. */
@@ -43,14 +46,21 @@ enum QueryError                        {
   * sees what one fragment cannot, such as a root type that another source's `schema { … }` names. Either way it reports
   * every SDL field that has no resolver and every resolver that has no field, before any request arrives.
   */
-final class Torpor[F[_]: Concurrent] private (sources: List[Source[F, ?, ?, ?]], limits: Planner.Limits) {
+final class Torpor[F[_]: Concurrent] private (
+    sources: List[Source[F, ?, ?, ?]],
+    limits: Planner.Limits,
+    private[source] val hooks: Hooks[F]
+) {
 
   private val registry: Map[(String, FieldCoordinate), Resolver[F]] =
     sources
       .flatMap(source => source.entries.map { case (coordinate, resolver) => (source.id -> coordinate) -> resolver })
       .toMap
 
-  def withLimits(limits: Planner.Limits): Torpor[F] = new Torpor[F](sources, limits)
+  def withLimits(limits: Planner.Limits): Torpor[F] = new Torpor[F](sources, limits, hooks)
+
+  /** Replace the extension points: authorization, error mapping, spans, slow-query and per-node timing. */
+  def withHooks(hooks: Hooks[F]): Torpor[F] = new Torpor[F](sources, limits, hooks)
 
   def schema: Either[NonEmptyChain[net.andimiller.torpor.schema.SchemaError], Schema] =
     // a source may exist only to serve fields another source declares, so a blank fragment is not an error
@@ -102,7 +112,7 @@ final class Torpor[F[_]: Concurrent] private (sources: List[Source[F, ?, ?, ?]],
     Durable[F](this, store)
 
   def run(plan: Plan): F[Response]   =
-    new Executor[F](plan, (source, coordinate) => registry.get(source -> coordinate)).run
+    new Executor[F](plan, (source, coordinate) => registry.get(source -> coordinate), hooks).run
 
   /** The whole request path: validate, plan, run. */
   def query(
@@ -113,9 +123,15 @@ final class Torpor[F[_]: Concurrent] private (sources: List[Source[F, ?, ?, ?]],
   ): Either[QueryError, F[Response]] =
     // Introspection is answered from the schema: no validation, no plan, no resolvers.
     Introspection.handle(schema, query) match {
-      case Some(data) => Right(Concurrent[F].pure(Response(data, Chain.empty)))
+      case Some(data) => Right(timed(query)(Concurrent[F].pure(Response(data, Chain.empty))))
       case None       => validated(schema, query, operationName, variables)
     }
+
+  /** Slow-query logging lives on `Hooks.onQuery`; nothing here needs a logger. */
+  private def timed(query: String)(response: F[Response]): F[Response] = {
+    val started = System.nanoTime()
+    response.flatMap(r => hooks.onQuery(query, (System.nanoTime() - started).nanos).as(r))
+  }
 
   private def validated(
       schema: Schema,
@@ -128,7 +144,7 @@ final class Torpor[F[_]: Concurrent] private (sources: List[Source[F, ?, ?, ?]],
       case Right(validated) =>
         Planner.build(schema, validated, variables, limits) match {
           case Left(problems) => Left(QueryError.Planning(problems))
-          case Right(plan)    => Right(run(plan))
+          case Right(plan)    => Right(timed(query)(run(plan)))
         }
     }
 }
@@ -146,7 +162,7 @@ object Torpor {
 
   // inline methods cannot call a private constructor, so they come through here
   private def assemble[F[_]: Concurrent](sources: List[Source[F, ?, ?, ?]]): Torpor[F] =
-    new Torpor[F](sources, Planner.Limits.none)
+    new Torpor[F](sources, Planner.Limits.none, Hooks.noop[F])
 
   final class Start[F[_]] {
 

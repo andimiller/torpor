@@ -1,11 +1,12 @@
 package net.andimiller.torpor.http
 
-import cats.effect.IO
+import cats.effect.{IO, IOLocal}
 import io.circe.Json
 import net.andimiller.torpor.macros.schema
 import net.andimiller.torpor.source.*
 import org.http4s.{EntityDecoder, Method, Request, Status, Uri}
 import org.http4s.circe._
+import org.typelevel.ci.CIString
 
 final class TorporHttpSuite extends munit.CatsEffectSuite {
 
@@ -65,6 +66,30 @@ final class TorporHttpSuite extends munit.CatsEffectSuite {
       assertEquals(status, Status.Ok)
       assert(json.hcursor.downField("data").focus.isEmpty)
       assert(json.noSpaces.contains("5.3.1"), json.noSpaces)
+    }
+  }
+
+  test("a request context set before the query reaches a resolver through IOLocal") {
+    IOLocal[Option[String]](None).flatMap { local =>
+      val sdl    = schema"""extend type Query { whoami: String }"""
+      val source = Source[IO]("context", sdl)(
+        resolver.root[IO](sdl.Query.whoami) { _ => local.get.map(_.getOrElse("anonymous")) }
+      )
+      val torpor = Torpor[IO](source)
+      val schema = torpor.schema.fold(errors => fail(errors.toChain.toList.map(_.render).mkString("; ")), identity)
+      val app    = TorporHttp
+        .routes(torpor, schema, request => local.set(request.headers.get(CIString("X-Workspace")).map(_.head.value)))
+        .orNotFound
+
+      implicit val json: EntityDecoder[IO, Json] = jsonDecoder[IO]
+      app
+        .run(
+          Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+            .withEntity("""{"query":"{ whoami }"}""")
+            .putHeaders("X-Workspace" -> "acme")
+        )
+        .flatMap(_.as[Json])
+        .map(response => assertEquals(response.hcursor.downField("data").get[String]("whoami").toOption, Some("acme")))
     }
   }
 

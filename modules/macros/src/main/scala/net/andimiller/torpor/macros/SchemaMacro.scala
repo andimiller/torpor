@@ -100,9 +100,10 @@ object SchemaMacro {
           byName.get(name) match {
             // `"DOG" | "CAT"` for args; the decoder cannot list a union's members, so it reads `OneOf[("DOG", "CAT")]`
             case Some(tpe) if tpe.kind == TypeKind.EnumType && tpe.enumValues.nonEmpty =>
+              val values = tpe.enumValues.map(_.name)
               Typed(
-                member = tpe.enumValues.map(literal).reduce(OrType(_, _)),
-                decoded = TypeRepr.of[Arguments.OneOf].appliedTo(tuple(tpe.enumValues.map(literal)))
+                member = values.map(literal).reduce(OrType(_, _)),
+                decoded = TypeRepr.of[Arguments.OneOf].appliedTo(tuple(values.map(literal)))
               )
             case Some(tpe) if tpe.kind == TypeKind.InputObjectType && !seen(name)      =>
               Typed.record(tpe.fields.map(field => field.name -> value(field.tpe, seen + name)))

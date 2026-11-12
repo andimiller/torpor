@@ -65,7 +65,7 @@ class SchemaMergeSuite extends munit.FunSuite {
 
     val species = schema.types("Species")
     assertEquals(species.kind, TypeKind.EnumType)
-    assertEquals(species.enumValues, List("DOG", "CAT", "RABBIT"))
+    assertEquals(species.enumValues.map(_.name), List("DOG", "CAT", "RABBIT"))
 
     val report = schema.types("AdoptionReport")
     assertEquals(report.fields.map(_.name), List("species", "adoptions", "medianDays"))

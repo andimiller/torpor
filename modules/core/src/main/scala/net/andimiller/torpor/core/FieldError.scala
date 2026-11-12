@@ -28,6 +28,9 @@ object FieldError {
   val MissingKey          = "MISSING_KEY"
   val InvalidParentValue  = "INVALID_PARENT_VALUE"
   val UpstreamUnavailable = "UPSTREAM_UNAVAILABLE"
+  val InvalidInput        = "INVALID_INPUT"
+  val NullInNonNull       = "NULL_IN_NON_NULL"
+  val Forbidden           = "FORBIDDEN"
 }
 
 /** A GraphQL response. `data` is always present; `errors` carries field errors with their response paths. */

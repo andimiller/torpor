@@ -17,7 +17,7 @@ object SdlRenderer {
     val body        = tpe.kind match {
       case TypeKind.ScalarType                          => List(s"scalar ${tpe.name}")
       case TypeKind.UnionType                           => List(s"union ${tpe.name} = ${tpe.unionMembers.mkString(" | ")}")
-      case TypeKind.EnumType                            => (s"enum ${tpe.name} {" :: tpe.enumValues.map(value => s"  $value")) :+ "}"
+      case TypeKind.EnumType                            => (s"enum ${tpe.name} {" :: tpe.enumValues.map(value => s"  ${value.name}")) :+ "}"
       case TypeKind.InputObjectType                     =>
         (s"input ${tpe.name} {" :: tpe.fields.map(renderField)) :+ "}"
       case TypeKind.ObjectType | TypeKind.InterfaceType =>
@@ -34,7 +34,21 @@ object SdlRenderer {
       s"  ${field.name}$args: ${renderRef(field.tpe)}"
   }
 
-  private def renderArgument(argument: InputValueDef): String = s"${argument.name}: ${renderRef(argument.tpe)}"
+  private def renderArgument(argument: InputValueDef): String =
+    s"${argument.name}: ${renderRef(argument.tpe)}" + argument.default.fold("")(value => s" = ${renderValue(value)}")
+
+  private def renderValue(value: net.andimiller.torpor.core.Value): String = value match {
+    case net.andimiller.torpor.core.Value.StringValue(v)    => "\"" + v + "\""
+    case net.andimiller.torpor.core.Value.BooleanValue(v)   => v.toString
+    case net.andimiller.torpor.core.Value.EnumValue(v)      => v
+    case net.andimiller.torpor.core.Value.IntValue(v)       => v.toString
+    case net.andimiller.torpor.core.Value.FloatValue(v)     => v.toString
+    case net.andimiller.torpor.core.Value.NullValue         => "null"
+    case net.andimiller.torpor.core.Value.ListValue(values) => values.map(renderValue).mkString("[", ", ", "]")
+    case net.andimiller.torpor.core.Value.ObjectValue(fs)   =>
+      fs.map { case (k, v) => s"$k: ${renderValue(v)}" }.mkString("{", ", ", "}")
+    case net.andimiller.torpor.core.Value.VariableValue(n)  => "$" + n
+  }
 
   private def renderRef(ref: TypeRef): String = ref match {
     case TypeRef.Named(name) => name

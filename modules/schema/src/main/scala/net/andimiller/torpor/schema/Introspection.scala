@@ -19,9 +19,9 @@ object Introspection {
   private val builtinScalars = Set("Int", "Float", "String", "Boolean", "ID")
 
   private sealed trait Node
-  private final case class Leaf(json: Json)                   extends Node
-  private final case class Arr(items: List[Node])             extends Node
-  private final case class Obj(field: String => Option[Node]) extends Node
+  private final case class Leaf(json: Json)                                     extends Node
+  private final case class Arr(items: List[Node])                               extends Node
+  private final case class Obj(typeName: String, field: String => Option[Node]) extends Node
 
   def handle(schema: Schema, text: String, source: String = "query"): Option[Json] =
     SangriaBridge.parseExecutable(source, text).toOption.flatMap { document =>
@@ -55,15 +55,17 @@ object Introspection {
 
   private def project(node: Node, selections: List[Selection], fragments: Map[String, FragmentDefinition]): Json =
     node match {
-      case Leaf(json) => json
-      case Arr(items) => Json.fromValues(items.map(item => project(item, selections, fragments)))
-      case Obj(field) =>
+      case Leaf(json)           => json
+      case Arr(items)           => Json.fromValues(items.map(item => project(item, selections, fragments)))
+      case Obj(typeName, field) =>
         Json.obj(
           flatten(selections, fragments).map { selection =>
             val key = selection.alias.getOrElse(selection.name)
-            key -> field(selection.name)
-              .map(next => project(next, selection.selections, fragments))
-              .getOrElse(Json.Null)
+            if (selection.name == "__typename") key -> Json.fromString(typeName)
+            else
+              key                                   -> field(selection.name)
+                .map(next => project(next, selection.selections, fragments))
+                .getOrElse(Json.Null)
           }: _*
         )
     }
@@ -96,32 +98,98 @@ object Introspection {
 
   // ---- the schema graph -----------------------------------------------------------------------
 
-  private def schemaNode(schema: Schema): Node = Obj {
-    case "description"      => Some(Leaf(Json.Null))
-    case "queryType"        => schema.query.map(name => refNode(schema, name))
-    case "mutationType"     => schema.mutation.map(name => refNode(schema, name))
-    case "subscriptionType" => schema.subscription.map(name => refNode(schema, name))
-    case "types"            =>
-      Some(Arr((builtinScalars.toList ++ schema.types.keys.toList).distinct.sorted.map(name => typeNode(schema, name))))
-    case "directives"       => Some(Arr(Nil))
-    case _                  => None
-  }
+  private def schemaNode(schema: Schema): Node = Obj(
+    "__Schema",
+    {
+      case "description"      => Some(Leaf(Json.Null))
+      case "queryType"        => schema.query.map(name => refNode(schema, name))
+      case "mutationType"     => schema.mutation.map(name => refNode(schema, name))
+      case "subscriptionType" => schema.subscription.map(name => refNode(schema, name))
+      case "types"            =>
+        Some(
+          Arr((builtinScalars.toList ++ schema.types.keys.toList).distinct.sorted.map(name => typeNode(schema, name)))
+        )
+      case "directives"       => Some(Arr(directiveNodes(schema)))
+      case _                  => None
+    }
+  )
+
+  /** The executable directives the validator knows, so tools can render their locations and arguments. */
+  private def directiveNodes(schema: Schema): List[Node] =
+    List(
+      directiveNode(
+        schema,
+        "skip",
+        "Skips the selection when `if` is true.",
+        List("FIELD", "FRAGMENT_SPREAD", "INLINE_FRAGMENT"),
+        List(InputValueDef("if", TypeRef.NonNull(TypeRef.Named("Boolean"))))
+      ),
+      directiveNode(
+        schema,
+        "include",
+        "Includes the selection when `if` is true.",
+        List("FIELD", "FRAGMENT_SPREAD", "INLINE_FRAGMENT"),
+        List(InputValueDef("if", TypeRef.NonNull(TypeRef.Named("Boolean"))))
+      ),
+      directiveNode(
+        schema,
+        "deprecated",
+        "Marks a field or enum value as deprecated.",
+        List("FIELD_DEFINITION", "ENUM_VALUE"),
+        Nil
+      ),
+      directiveNode(
+        schema,
+        "specifiedBy",
+        "Points at the specification of a custom scalar.",
+        List("SCALAR"),
+        Nil
+      )
+    )
+
+  private def directiveNode(
+      schema: Schema,
+      name: String,
+      description: String,
+      locations: List[String],
+      args: List[InputValueDef]
+  ): Node = Obj(
+    "__Directive",
+    {
+      case "name"         => Some(Leaf(Json.fromString(name)))
+      case "description"  => Some(Leaf(Json.fromString(description)))
+      case "locations"    => Some(Arr(locations.map(location => Leaf(Json.fromString(location)))))
+      case "args"         => Some(Arr(args.map(arg => inputValueNode(schema, arg))))
+      case "isRepeatable" => Some(Leaf(Json.fromBoolean(false)))
+      case _              => None
+    }
+  )
 
   /** A bare reference: enough for `fragment TypeRef on __Type { kind name ofType { … } }`. */
-  private def refNode(schema: Schema, name: String): Node = Obj {
-    case "kind"        => Some(Leaf(Json.fromString(kindOf(schema, name))))
-    case "name"        => Some(Leaf(Json.fromString(name)))
-    case "description" => Some(Leaf(descriptionOf(schema, name)))
-    case "ofType"      => Some(Leaf(Json.Null))
-    case _             => None
-  }
+  private def refNode(schema: Schema, name: String): Node = Obj(
+    "__Type",
+    {
+      case "kind"           => Some(Leaf(Json.fromString(kindOf(schema, name))))
+      case "name"           => Some(Leaf(Json.fromString(name)))
+      case "description"    => Some(Leaf(descriptionOf(schema, name)))
+      case "ofType"         => Some(Leaf(Json.Null))
+      case "specifiedByURL" =>
+        Some(Leaf(schema.types.get(name).flatMap(_.specifiedByUrl).fold(Json.Null)(Json.fromString)))
+      case _                => None
+    }
+  )
 
-  private def wrapperNode(kind: String, of: Node): Node = Obj {
-    case "kind"   => Some(Leaf(Json.fromString(kind)))
-    case "name"   => Some(Leaf(Json.Null))
-    case "ofType" => Some(of)
-    case _        => None
-  }
+  private def wrapperNode(kind: String, of: Node): Node = Obj(
+    "__Type",
+    {
+      case "kind"           => Some(Leaf(Json.fromString(kind)))
+      case "name"           => Some(Leaf(Json.Null))
+      case "ofType"         => Some(of)
+      case "description"    => Some(Leaf(Json.Null))
+      case "specifiedByURL" => Some(Leaf(Json.Null))
+      case _                => None
+    }
+  )
 
   private def typeRefNode(schema: Schema, tpe: TypeRef): Node =
     tpe match {
@@ -130,48 +198,56 @@ object Introspection {
       case TypeRef.NonNull(of) => wrapperNode("NON_NULL", typeRefNode(schema, of))
     }
 
-  private def typeNode(schema: Schema, name: String): Node = Obj {
-    case "kind"          => Some(Leaf(Json.fromString(kindOf(schema, name))))
-    case "name"          => Some(Leaf(Json.fromString(name)))
-    case "description"   => Some(Leaf(descriptionOf(schema, name)))
-    case "fields"        =>
-      Some(
-        schema.types
-          .get(name)
-          .filter(tpe => composite(tpe.kind))
-          .fold(Leaf(Json.Null): Node)(tpe => Arr(tpe.fields.map(field => fieldNode(schema, field))))
-      )
-    case "interfaces"    =>
-      Some(
-        schema.types
-          .get(name)
-          .filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
-          .fold(Leaf(Json.Null): Node)(tpe => Arr(tpe.interfaces.map(iface => refNode(schema, iface))))
-      )
-    case "possibleTypes" => Some(possibleTypesNode(schema, name))
-    case "enumValues"    =>
-      Some(
-        schema.types
-          .get(name)
-          .filter(_.kind == TypeKind.EnumType)
-          .fold(Leaf(Json.Null): Node)(tpe => Arr(tpe.enumValues.map(enumValueNode)))
-      )
-    case "inputFields"   =>
-      Some(
-        schema.types
-          .get(name)
-          .filter(_.kind == TypeKind.InputObjectType)
-          .fold(Leaf(Json.Null): Node)(tpe =>
-            Arr(
-              tpe.fields.map(field =>
-                inputValueNode(schema, InputValueDef(field.name, field.tpe, description = field.description))
+  private def typeNode(schema: Schema, name: String): Node = Obj(
+    "__Type",
+    {
+      case "kind"           => Some(Leaf(Json.fromString(kindOf(schema, name))))
+      case "name"           => Some(Leaf(Json.fromString(name)))
+      case "description"    => Some(Leaf(descriptionOf(schema, name)))
+      case "fields"         =>
+        Some(
+          schema.types
+            .get(name)
+            .filter(tpe => composite(tpe.kind))
+            .fold(Leaf(Json.Null): Node)(tpe => Arr(tpe.fields.map(field => fieldNode(schema, field))))
+        )
+      case "interfaces"     =>
+        Some(
+          schema.types
+            .get(name)
+            .filter(tpe => tpe.kind == TypeKind.ObjectType || tpe.kind == TypeKind.InterfaceType)
+            .fold(Leaf(Json.Null): Node)(tpe => Arr(tpe.interfaces.map(iface => refNode(schema, iface))))
+        )
+      case "possibleTypes"  => Some(possibleTypesNode(schema, name))
+      case "enumValues"     =>
+        Some(
+          schema.types
+            .get(name)
+            .filter(_.kind == TypeKind.EnumType)
+            .fold(Leaf(Json.Null): Node)(tpe => Arr(tpe.enumValues.map(enumValueNode)))
+        )
+      case "inputFields"    =>
+        Some(
+          schema.types
+            .get(name)
+            .filter(_.kind == TypeKind.InputObjectType)
+            .fold(Leaf(Json.Null): Node)(tpe =>
+              Arr(
+                tpe.fields.map(field =>
+                  inputValueNode(
+                    schema,
+                    InputValueDef(field.name, field.tpe, field.defaultValue, field.description)
+                  )
+                )
               )
             )
-          )
-      )
-    case "ofType"        => Some(Leaf(Json.Null))
-    case _               => None
-  }
+        )
+      case "ofType"         => Some(Leaf(Json.Null))
+      case "specifiedByURL" =>
+        Some(Leaf(schema.types.get(name).flatMap(_.specifiedByUrl).fold(Json.Null)(Json.fromString)))
+      case _                => None
+    }
+  )
 
   private def possibleTypesNode(schema: Schema, name: String): Node =
     schema.types.get(name) match {
@@ -187,31 +263,57 @@ object Introspection {
       case _                                               => Leaf(Json.Null)
     }
 
-  private def fieldNode(schema: Schema, field: FieldDef): Node = Obj {
-    case "name"              => Some(Leaf(Json.fromString(field.name)))
-    case "description"       => Some(Leaf(field.description.fold(Json.Null)(Json.fromString)))
-    case "args"              => Some(Arr(field.args.map(arg => inputValueNode(schema, arg))))
-    case "type"              => Some(typeRefNode(schema, field.tpe))
-    case "isDeprecated"      => Some(Leaf(Json.fromBoolean(false)))
-    case "deprecationReason" => Some(Leaf(Json.Null))
-    case _                   => None
-  }
+  private def fieldNode(schema: Schema, field: FieldDef): Node = Obj(
+    "__Field",
+    {
+      case "name"              => Some(Leaf(Json.fromString(field.name)))
+      case "description"       => Some(Leaf(field.description.fold(Json.Null)(Json.fromString)))
+      case "args"              => Some(Arr(field.args.map(arg => inputValueNode(schema, arg))))
+      case "type"              => Some(typeRefNode(schema, field.tpe))
+      case "isDeprecated"      => Some(Leaf(Json.fromBoolean(field.deprecationReason.isDefined)))
+      case "deprecationReason" => Some(Leaf(field.deprecationReason.fold(Json.Null)(Json.fromString)))
+      case _                   => None
+    }
+  )
 
-  private def inputValueNode(schema: Schema, value: InputValueDef): Node = Obj {
-    case "name"         => Some(Leaf(Json.fromString(value.name)))
-    case "description"  => Some(Leaf(value.description.fold(Json.Null)(Json.fromString)))
-    case "type"         => Some(typeRefNode(schema, value.tpe))
-    case "defaultValue" => Some(Leaf(Json.Null))
-    case _              => None
-  }
+  private def inputValueNode(schema: Schema, value: InputValueDef): Node = Obj(
+    "__InputValue",
+    {
+      case "name"         => Some(Leaf(Json.fromString(value.name)))
+      case "description"  => Some(Leaf(value.description.fold(Json.Null)(Json.fromString)))
+      case "type"         => Some(typeRefNode(schema, value.tpe))
+      case "defaultValue" => Some(Leaf(value.default.fold(Json.Null)(v => Json.fromString(renderValue(v)))))
+      case _              => None
+    }
+  )
 
-  private def enumValueNode(value: String): Node = Obj {
-    case "name"              => Some(Leaf(Json.fromString(value)))
-    case "description"       => Some(Leaf(Json.Null))
-    case "isDeprecated"      => Some(Leaf(Json.fromBoolean(false)))
-    case "deprecationReason" => Some(Leaf(Json.Null))
-    case _                   => None
-  }
+  private def enumValueNode(value: EnumValueDef): Node = Obj(
+    "__EnumValue",
+    {
+      case "name"              => Some(Leaf(Json.fromString(value.name)))
+      case "description"       => Some(Leaf(value.description.fold(Json.Null)(Json.fromString)))
+      case "isDeprecated"      => Some(Leaf(Json.fromBoolean(value.deprecationReason.isDefined)))
+      case "deprecationReason" => Some(Leaf(value.deprecationReason.fold(Json.Null)(Json.fromString)))
+      case _                   => None
+    }
+  )
+
+  /** A default as a GraphQL literal, which is what `__InputValue.defaultValue` is defined to be. */
+  private def renderValue(value: net.andimiller.torpor.core.Value): String =
+    value match {
+      case net.andimiller.torpor.core.Value.IntValue(v)         => v.toString
+      case net.andimiller.torpor.core.Value.FloatValue(v)       => v.toString
+      case net.andimiller.torpor.core.Value.StringValue(v)      =>
+        "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+      case net.andimiller.torpor.core.Value.BooleanValue(v)     => v.toString
+      case net.andimiller.torpor.core.Value.EnumValue(v)        => v
+      case net.andimiller.torpor.core.Value.NullValue           => "null"
+      case net.andimiller.torpor.core.Value.ListValue(values)   =>
+        values.map(renderValue).mkString("[", ", ", "]")
+      case net.andimiller.torpor.core.Value.ObjectValue(fields) =>
+        fields.map { case (name, v) => s"$name: ${renderValue(v)}" }.mkString("{", ", ", "}")
+      case net.andimiller.torpor.core.Value.VariableValue(n)    => "$" + n
+    }
 
   private def kindOf(schema: Schema, name: String): String =
     if (builtinScalars(name)) "SCALAR"

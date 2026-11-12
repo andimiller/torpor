@@ -79,22 +79,24 @@ object EsiGraphQL {
       resolver
         .field[IO](universe.Character.corporation)
         .key((character: EsiCharacter) => character.corporationId)
-        .batch((ids: NonEmptyList[Long]) => api.corporations(ids)),
+        .batch((_, ids: NonEmptyList[Long]) => api.corporations(ids)),
       // ESI gives a corporation zero or one alliance: an optional key resolves to null, never to an error
       resolver
         .optionalField[IO](universe.Corporation.alliance)
         .key((corporation: EsiCorporation) => corporation.allianceId)
-        .batch((ids: NonEmptyList[Long]) => api.alliances(ids)),
+        .batch((_, ids: NonEmptyList[Long]) => api.alliances(ids)),
       // one constellations call per level, however many systems are on the route
       resolver
         .field[IO](universe.SolarSystem.constellation)
         .key((system: EsiSolarSystem) => system.constellationId)
-        .batch((ids: NonEmptyList[Long]) => api.constellations(ids)),
+        .batch((_, ids: NonEmptyList[Long]) => api.constellations(ids)),
       // names is a batch endpoint, so the last level collapses into one call for every region on the route
       resolver
         .field[IO](universe.Constellation.region)
         .key((constellation: EsiConstellation) => constellation.regionId)
-        .batch((ids: NonEmptyList[Long]) => api.names(ids).map(_.map { case (id, name) => id -> EsiRegion(id, name) }))
+        .batch((_, ids: NonEmptyList[Long]) =>
+          api.names(ids).map(_.map { case (id, name) => id -> EsiRegion(id, name) })
+        )
     )
 
   // the route is one ESI call that returns N system ids: the fan-out the planner exists for, and the only query here

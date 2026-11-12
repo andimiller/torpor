@@ -1,6 +1,17 @@
 package net.andimiller.torpor.source
 
-import net.andimiller.torpor.core.{Argument, FieldCoordinate, InlineField, NodeField, NodeId, Plan, SelectionSet, Value}
+import net.andimiller.torpor.core.{
+  Argument,
+  FieldCoordinate,
+  InlineField,
+  NodeField,
+  NodeId,
+  Plan,
+  SelectionSet,
+  TypeNameField,
+  TypeRef,
+  Value
+}
 import net.andimiller.torpor.schema.{SdlFragment, Schema, Executable}
 
 class PlannerSuite extends munit.FunSuite {
@@ -41,6 +52,10 @@ class PlannerSuite extends munit.FunSuite {
       case Left(errs)    => fail(errs.toChain.toList.map(_.render).mkString("; "))
     }
 
+  private val nonNullString  = TypeRef.NonNull(TypeRef.Named("String"))
+  private val nonNullInt     = TypeRef.NonNull(TypeRef.Named("Int"))
+  private val nonNullSpecies = TypeRef.NonNull(TypeRef.Named("Species"))
+
   private def planOf(query: String, variables: Map[String, Value] = Map.empty): Plan =
     Executable.validate(schema, query) match {
       case Left(errors)     => fail(errors.toChain.toList.map(_.render).mkString("\n"))
@@ -77,8 +92,13 @@ class PlannerSuite extends munit.FunSuite {
       plan.roots,
       SelectionSet(
         List(
-          NodeField("pets", "pets", NodeId("n0")),
-          NodeField("adoptionReport", "adoptionReport", NodeId("n2"))
+          NodeField(
+            "pets",
+            "pets",
+            NodeId("n0"),
+            TypeRef.NonNull(TypeRef.ListOf(TypeRef.NonNull(TypeRef.Named("Pet"))))
+          ),
+          NodeField("adoptionReport", "adoptionReport", NodeId("n2"), TypeRef.NonNull(TypeRef.Named("AdoptionReport")))
         )
       )
     )
@@ -90,7 +110,12 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(pets.dependencies, Nil)
     assertEquals(
       pets.selectionSet,
-      SelectionSet(List(InlineField("name", "name", SelectionSet.empty), NodeField("owner", "owner", NodeId("n1"))))
+      SelectionSet(
+        List(
+          InlineField("name", "name", SelectionSet.empty, nonNullString),
+          NodeField("owner", "owner", NodeId("n1"), TypeRef.NonNull(TypeRef.Named("Owner")))
+        )
+      )
     )
 
     val owner = plan.node(NodeId("n1")).get
@@ -101,7 +126,10 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(
       owner.selectionSet,
       SelectionSet(
-        List(InlineField("name", "name", SelectionSet.empty), InlineField("email", "email", SelectionSet.empty))
+        List(
+          InlineField("name", "name", SelectionSet.empty, nonNullString),
+          InlineField("email", "email", SelectionSet.empty, nonNullString)
+        )
       )
     )
 
@@ -112,15 +140,37 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(report.dependencies, Nil)
   }
 
-  test("arguments become literals") {
+  test("arguments become literals, sorted, with SDL defaults filled") {
     val plan = planOf("""{ pets(species: CAT, first: 3) { name } }""")
-    val node = plan.nodes.head
-    assertEquals(node.args, List(Argument("species", Value.EnumValue("CAT")), Argument("first", Value.IntValue(3))))
+    assertEquals(
+      plan.nodes.head.args,
+      List(Argument("first", Value.IntValue(3)), Argument("species", Value.EnumValue("CAT")))
+    )
+  }
+
+  test("an omitted argument takes its SDL default") {
+    val plan = planOf("""{ pets(species: CAT) { name } }""")
+    assertEquals(
+      plan.nodes.head.args,
+      List(Argument("first", Value.IntValue(20)), Argument("species", Value.EnumValue("CAT")))
+    )
   }
 
   test("aliases move to the response key, not the field") {
     val plan = planOf("""{ dogs: pets(first: 3) { name } }""")
-    assertEquals(plan.roots, SelectionSet(List(NodeField("dogs", "pets", NodeId("n0")))))
+    assertEquals(
+      plan.roots,
+      SelectionSet(
+        List(
+          NodeField(
+            "dogs",
+            "pets",
+            NodeId("n0"),
+            TypeRef.NonNull(TypeRef.ListOf(TypeRef.NonNull(TypeRef.Named("Pet"))))
+          )
+        )
+      )
+    )
     assertEquals(plan.nodes.head.field, FieldCoordinate("Query", "pets"))
   }
 
@@ -134,10 +184,15 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(plan.nodes.head.args, List(Argument("first", Value.IntValue(5))))
   }
 
-  test("a missing variable is an error") {
-    val problems = planErrors("""query Q($first: Int) { pets(first: $first) { name } }""")
+  test("an argument default is used when the variable has no value and no default") {
+    val plan = planOf("""query Q($first: Int) { pets(first: $first) { name } }""")
+    assertEquals(plan.nodes.head.args, List(Argument("first", Value.IntValue(20))))
+  }
+
+  test("a missing variable with no default anywhere is an error") {
+    val problems = planErrors("""query Q($species: Species!) { adoptionReport(species: $species) { adoptions } }""")
     assertEquals(problems.map(_.kind), List(PlanErrorKind.MissingVariable))
-    assert(problems.head.render.contains("variable '$first'"))
+    assert(problems.head.render.contains("variable '$species'"))
   }
 
   test("duplicate selections with the same response key merge into one node") {
@@ -146,7 +201,10 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(
       plan.nodes.head.selectionSet,
       SelectionSet(
-        List(InlineField("name", "name", SelectionSet.empty), InlineField("species", "species", SelectionSet.empty))
+        List(
+          InlineField("name", "name", SelectionSet.empty, nonNullString),
+          InlineField("species", "species", SelectionSet.empty, nonNullSpecies)
+        )
       )
     )
   }
@@ -163,9 +221,9 @@ class PlannerSuite extends munit.FunSuite {
       plan.nodes.head.selectionSet,
       SelectionSet(
         List(
-          InlineField("name", "name", SelectionSet.empty),
-          InlineField("species", "species", SelectionSet.empty),
-          NodeField("owner", "owner", NodeId("n1"))
+          InlineField("name", "name", SelectionSet.empty, nonNullString),
+          InlineField("species", "species", SelectionSet.empty, nonNullSpecies),
+          NodeField("owner", "owner", NodeId("n1"), TypeRef.NonNull(TypeRef.Named("Owner")))
         )
       )
     )
@@ -178,21 +236,46 @@ class PlannerSuite extends munit.FunSuite {
     )
     assertEquals(
       plan.nodes.head.selectionSet,
-      SelectionSet(List(InlineField("species", "species", SelectionSet.empty)))
+      SelectionSet(List(InlineField("species", "species", SelectionSet.empty, nonNullSpecies)))
     )
   }
 
-  test("a narrowing type condition is unsupported, not silently flattened") {
-    val problems = planErrors("""{ anything { ... on Pet { name } } }""")
-    assertEquals(problems.map(_.kind), List(PlanErrorKind.Unsupported))
-    assert(problems.head.render.contains("type conditions are not implemented until M1"))
+  test("a union is planned with the fragments restricted to their members") {
+    val plan = planOf("""{ anything { __typename ... on Pet { name } ... on Owner { email } } }""")
+    assertEquals(
+      plan.roots,
+      SelectionSet(List(NodeField("anything", "anything", NodeId("n0"), TypeRef.Named("Anything"))))
+    )
+    assertEquals(
+      plan.nodes.head.selectionSet,
+      SelectionSet(
+        List(
+          TypeNameField("__typename", "Anything"),
+          InlineField("name", "name", SelectionSet.empty, nonNullString, List("Pet")),
+          InlineField("email", "email", SelectionSet.empty, nonNullString, List("Owner"))
+        )
+      )
+    )
+  }
+
+  test("a type condition on an object's own type adds no restriction") {
+    val plan = planOf("""{ pets(first: 3) { name ... on Pet { species } } }""")
+    assertEquals(
+      plan.nodes.head.selectionSet,
+      SelectionSet(
+        List(
+          InlineField("name", "name", SelectionSet.empty, nonNullString),
+          InlineField("species", "species", SelectionSet.empty, nonNullSpecies)
+        )
+      )
+    )
   }
 
   test("a type condition on the parent type itself is fine") {
     val plan = planOf("""{ adoptionReport(species: DOG) { ... on AdoptionReport { adoptions } } }""")
     assertEquals(
       plan.nodes.head.selectionSet,
-      SelectionSet(List(InlineField("adoptions", "adoptions", SelectionSet.empty)))
+      SelectionSet(List(InlineField("adoptions", "adoptions", SelectionSet.empty, nonNullInt)))
     )
   }
 
@@ -216,10 +299,11 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(plan.nodes.head.selectionSet, SelectionSet.empty)
   }
 
-  test("__typename is rejected until the plan carries static types") {
-    val problems = planErrors("{ pets { __typename } }")
-    assertEquals(problems.map(_.kind), List(PlanErrorKind.Unsupported))
-    assert(problems.head.render.contains("__typename is not implemented until M1"))
+  test("__typename becomes a field the assembler answers") {
+    val plan = planOf("{ pets { __typename } }")
+    assertEquals(plan.nodes.head.selectionSet, SelectionSet(List(TypeNameField("__typename", "Pet"))))
+    assertEquals(plan.nodes.head.field, FieldCoordinate("Query", "pets"))
+    assertEquals(plan.fieldCount, 2)
   }
 
   test("planning is deterministic") {

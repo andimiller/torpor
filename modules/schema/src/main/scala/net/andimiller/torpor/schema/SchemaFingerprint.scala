@@ -18,12 +18,19 @@ object SchemaFingerprint {
         canonical.append(field.name).append('(')
         field.args
           .sortBy(_.name)
-          .foreach(arg => canonical.append(arg.name).append(':').append(render(arg.tpe)).append(','))
+          .foreach(arg =>
+            canonical
+              .append(arg.name)
+              .append(':')
+              .append(render(arg.tpe))
+              .append(arg.default.fold("")(value => "=" + renderValue(value)))
+              .append(',')
+          )
         canonical.append("):").append(render(field.tpe)).append(';')
       }
       canonical.append("interfaces=").append(tpe.interfaces.sorted.mkString(","))
       canonical.append(";members=").append(tpe.unionMembers.sorted.mkString(","))
-      canonical.append(";values=").append(tpe.enumValues.sorted.mkString(","))
+      canonical.append(";values=").append(tpe.enumValues.map(_.name).sorted.mkString(","))
       canonical.append('\n')
     }
 
@@ -34,6 +41,9 @@ object SchemaFingerprint {
     val digest = MessageDigest.getInstance("SHA-256").digest(canonical.toString.getBytes("UTF-8"))
     digest.map(b => f"$b%02x").mkString
   }
+
+  private def renderValue(value: net.andimiller.torpor.core.Value): String =
+    value.toJson.noSpaces
 
   private def render(tpe: TypeRef): String =
     tpe match {

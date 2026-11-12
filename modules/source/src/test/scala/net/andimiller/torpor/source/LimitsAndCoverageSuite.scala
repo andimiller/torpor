@@ -29,7 +29,7 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
     resolver
       .field[IO](ownersSdl.Pet.owner)
       .key((p: CoveragePet) => p.ownerId)
-      .batch((keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "Ada").toMap))
+      .batch((_, keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "Ada").toMap))
   )
 
   private def schemaOf(torpor: Torpor[IO]): Schema =
@@ -110,7 +110,7 @@ class LimitsAndCoverageSuite extends munit.FunSuite {
         resolver
           .field[IO](petsSdl.Pet.name)
           .key((p: CoveragePet) => p.id)
-          .batch((keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "x").toMap))
+          .batch((_, keys: NonEmptyList[String]) => IO(keys.toList.map(k => k -> "x").toMap))
       )
       Torpor[IO](withName, owners)
     """)

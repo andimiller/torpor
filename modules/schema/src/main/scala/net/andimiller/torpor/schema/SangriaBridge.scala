@@ -74,20 +74,27 @@ private[schema] object SangriaBridge {
       case d: ast.EnumTypeDefinition        =>
         types += TypeDef
           .empty(d.name, TypeKind.EnumType, at(d.location))
-          .copy(description = d.description.map(_.value), enumValues = d.values.toList.map(_.name))
+          .copy(description = d.description.map(_.value), enumValues = d.values.toList.map(enumValueDef))
       case d: ast.InputObjectTypeDefinition =>
         types += TypeDef
           .empty(d.name, TypeKind.InputObjectType, at(d.location))
           .copy(
             description = d.description.map(_.value),
             fields = d.fields.toList.map(f =>
-              FieldDef(f.name, typeRef(f.valueType), Nil, f.description.map(_.value), at(f.location))
+              FieldDef(
+                f.name,
+                typeRef(f.valueType),
+                Nil,
+                f.description.map(_.value),
+                at(f.location),
+                defaultValue = f.defaultValue.map(toValue)
+              )
             )
           )
       case d: ast.ScalarTypeDefinition      =>
         types += TypeDef
           .empty(d.name, TypeKind.ScalarType, at(d.location))
-          .copy(description = d.description.map(_.value))
+          .copy(description = d.description.map(_.value), specifiedByUrl = specifiedBy(d.directives))
 
       case e: ast.ObjectTypeExtensionDefinition      =>
         extensions += Extension(
@@ -116,7 +123,9 @@ private[schema] object SangriaBridge {
         )
       case e: ast.EnumTypeExtensionDefinition        =>
         extensions += Extension(
-          TypeDef.empty(e.name, TypeKind.EnumType, at(e.location)).copy(enumValues = e.values.toList.map(_.name)),
+          TypeDef
+            .empty(e.name, TypeKind.EnumType, at(e.location))
+            .copy(enumValues = e.values.toList.map(enumValueDef)),
           at(e.location)
         )
       case e: ast.InputObjectTypeExtensionDefinition =>
@@ -125,7 +134,16 @@ private[schema] object SangriaBridge {
             .empty(e.name, TypeKind.InputObjectType, at(e.location))
             .copy(
               fields = e.fields.toList
-                .map(f => FieldDef(f.name, typeRef(f.valueType), Nil, f.description.map(_.value), at(f.location)))
+                .map(f =>
+                  FieldDef(
+                    f.name,
+                    typeRef(f.valueType),
+                    Nil,
+                    f.description.map(_.value),
+                    at(f.location),
+                    defaultValue = f.defaultValue.map(toValue)
+                  )
+                )
             ),
           at(e.location)
         )
@@ -170,11 +188,35 @@ private[schema] object SangriaBridge {
       f.name,
       typeRef(f.fieldType),
       f.arguments.toList.map(iv =>
-        InputValueDef(iv.name, typeRef(iv.valueType), iv.defaultValue.isDefined, iv.description.map(_.value))
+        InputValueDef(iv.name, typeRef(iv.valueType), iv.defaultValue.map(toValue), iv.description.map(_.value))
       ),
       f.description.map(_.value),
-      origin(source, f.location)
+      origin(source, f.location),
+      deprecationReason = deprecation(f.directives)
     )
+
+  private def enumValueDef(v: ast.EnumValueDefinition): EnumValueDef =
+    EnumValueDef(v.name, v.description.map(_.value), deprecation(v.directives))
+
+  private def deprecation(directives: Seq[ast.Directive]): Option[String] =
+    directives.find(_.name == "deprecated").map { directive =>
+      directive.arguments
+        .find(_.name == "reason")
+        .flatMap(argument => stringValue(argument.value))
+        .getOrElse("No longer supported")
+    }
+
+  private def specifiedBy(directives: Seq[ast.Directive]): Option[String] =
+    directives
+      .find(_.name == "specifiedBy")
+      .flatMap(_.arguments.find(_.name == "url"))
+      .flatMap(argument => stringValue(argument.value))
+
+  private def stringValue(value: ast.Value): Option[String] =
+    value match {
+      case v: ast.StringValue => Some(v.value)
+      case _                  => None
+    }
 
   private def typeRef(t: ast.Type): TypeRef =
     t match {

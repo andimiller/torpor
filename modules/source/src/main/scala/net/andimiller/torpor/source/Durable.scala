@@ -114,7 +114,7 @@ final class Durable[F[_]: Concurrent](
     }
 
   private def visitor(plan: Plan): SuspendableDagVisitor[F, NodeId, PlanNode, NodeResult, Unit, Json, Json] = {
-    val rootKeys = plan.roots.selections.collect { case NodeField(responseKey, _, id) => id -> responseKey }.toMap
+    val rootKeys = plan.roots.selections.collect { case NodeField(responseKey, _, id, _, _) => id -> responseKey }.toMap
 
     new SimpleSuspendableDagVisitor[F, NodeId, PlanNode, NodeResult, Unit, Json, Json] {
       def run(id: NodeId, node: PlanNode, inputs: Map[NodeId, NodeResult]): F[StepResult[NodeResult, Json]] =
@@ -122,7 +122,14 @@ final class Durable[F[_]: Concurrent](
           case None           => Concurrent[F].raiseError(new IllegalStateException(s"no resolver for ${node.field.render}"))
           case Some(resolver) =>
             NodeRuntime
-              .run(plan, node, node.dependencies.headOption.flatMap(inputs.get), resolver, rootKeys.get(id))
+              .run(
+                plan,
+                node,
+                node.dependencies.headOption.flatMap(inputs.get),
+                resolver,
+                rootKeys.get(id),
+                torpor.hooks
+              )
               .map {
                 case NodeOutcome.Completed(result) => StepResult.Complete(result)
                 case NodeOutcome.Suspended(handle) => StepResult.Suspend(handle)
@@ -138,23 +145,22 @@ final class Durable[F[_]: Concurrent](
       ): F[StepResult[NodeResult, Json]] =
         torpor.resolverFor(node.source, node.field) match {
           case Some(Resolver.Suspending(_, resumeFn)) =>
-            attemptResume(resumeFn(handle, payload)).map {
+            attemptResume(resumeFn(handle, payload)).flatMap {
               case Right(Step.Complete(json))  =>
-                StepResult.Complete(NodeResult(List(pathOf(rootKeys.get(id)) -> json), cats.data.Chain.empty))
-              case Right(Step.Suspend(handle)) => StepResult.Suspend(handle)
+                Concurrent[F].pure(
+                  StepResult.Complete(NodeResult(List(pathOf(rootKeys.get(id)) -> json), cats.data.Chain.empty))
+                )
+              case Right(Step.Suspend(handle)) => Concurrent[F].pure(StepResult.Suspend(handle))
               case Left(t)                     =>
-                StepResult.Complete(
-                  NodeResult(
-                    List(pathOf(rootKeys.get(id)) -> Json.Null),
-                    cats.data.Chain.one(
-                      FieldError(
-                        Option(t.getMessage).getOrElse(t.toString),
-                        pathOf(rootKeys.get(id)),
-                        FieldError.UpstreamUnavailable
-                      )
+                // resume failures are client-visible too, so they go through the same mapper as fresh runs
+                torpor.hooks.onError(node.field, t).map { error =>
+                  StepResult.Complete(
+                    NodeResult(
+                      List(pathOf(rootKeys.get(id)) -> Json.Null),
+                      cats.data.Chain.one(FieldError(error.message, pathOf(rootKeys.get(id)), error.code))
                     )
                   )
-                )
+                }
             }
           case _                                      =>
             Concurrent[F].raiseError(new IllegalStateException(s"${node.field.render} is not a suspending resolver"))

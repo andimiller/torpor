@@ -15,10 +15,16 @@ enum Resolver[F[_]] {
 
   /** A keyed field: extract a key from each parent value, then one batch call for all of them.
     *
+    * Arguments are the node's own, already literal and shared by every parent in the node (the planner gives each
+    * distinct argument set its own node), so the batch sees them once.
+    *
     * Keys are strings because a batch is keyed by equality and the key has to survive a JSON round trip. The typed DSL
     * encodes them with circe; a key that cannot round-trip is a registration error, not a query error.
     */
-  case Batch(key: Json => Either[String, String], batch: NonEmptyList[String] => F[Map[String, Json]])
+  case Batch(
+      key: Json => Either[String, String],
+      batch: (List[Argument], NonEmptyList[String]) => F[Map[String, Json]]
+  )
 
   /** A root field that can park the run. `start` either completes or suspends with a handle; `resume` gets that handle
     * and the webhook payload back and may complete or suspend again.

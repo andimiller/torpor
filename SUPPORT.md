@@ -24,8 +24,11 @@ goal is that nothing half-works silently.
 | Errors as values: `UPSTREAM_UNAVAILABLE`, `MISSING_KEY`, `INVALID_PARENT_VALUE`, `INVALID_INPUT` | yes |
 | Response assembly keyed by alias, partial data preserved | yes |
 | Resolver DSL: `root` (typed args + result) and keyed `field(...).key(...).batch(...)` | yes |
-| `__typename` | no: rejected by the planner until the plan carries static types (M1) |
-| Null bubbling (non-null field resolving to null) | no: nulls pass through, no bubbling |
+| Arguments on keyed fields: typed from the SDL, passed to the batch, substituted variables and SDL defaults | yes |
+| Union/interface planning: `... on T`, named fragments, `__typename` anywhere | yes; a resolver supplies a member's `__typename` (`resolver.tagged` helps) |
+| Null bubbling (non-null field resolving to null) | yes: the nearest nullable ancestor is nulled, the error keeps the original path |
+| Input coercion and defaults for literals and variables (built-in scalars, enums, input objects) | yes; custom scalar input follows the `Scalar` binding's `Decoder` |
+| Hooks: per-node span/timing, slow-query log, per-batch authorization, global error mapper | yes (`Hooks[F]`, `Torpor.withHooks`) |
 | `torpor-testkit` (`assertBatched`) | no: call-count assertions live in `ExecutorSuite` for now |
 | `maxDepth` / `maxFields` as plan phases | yes |
 | SDL↔resolver coverage check at startup (missing and unexpected resolvers) | yes |
@@ -49,11 +52,12 @@ Implemented (spec section in brackets):
 
 Not implemented, and therefore rejected or deferred (see "Scoping discipline" in the notes):
 
-- [5.6.1] value coercion and [5.8.5] variable usages allowed — literals are shape-checked only where a later stage needs them; types are not coerced here
-- [5.3.2] cross-fragment merging and return-type compatibility (the same-level check above is all)
-- [5.5.1.1] possible fragment spreads (type-condition overlap)
+- [5.6.1] the full spec coercion table: built-in scalars, enums and input objects are coerced in the planner; a custom scalar's values pass through to its decoder
+- [5.8.5] variable usages allowed: a variable's declared type is not compared with the argument's type
+- [5.3.2] cross-fragment merging and return-type compatibility (the planner rejects conflicting response keys where type conditions overlap)
+- [5.5.1.1] possible fragment spreads are checked by the planner at execution time, not by validation
 - [5.5.1.3] unused fragments, [5.8.4] unused variables (harmless; not rejected)
-- introspection (`__schema`, `__type`), `@defer`, `@stream`, subscriptions: rejected with `unsupported`
+- introspection (`__schema`, `__type` in a normal query), `@defer`, `@stream`, subscriptions: rejected with `unsupported`
 - custom directives: rejected at SDL merge time
 
 ### Executor
@@ -115,6 +119,9 @@ All three from `pitch.md` are met and tested:
 | `@defer` in queries | no |
 
 ## Known v1 limitations
+
+- An input object or argument of a custom scalar decodes with the `Decoder` of the Scala type its `Scalar` binding names; an `ID` argument is a `String` by default, or whatever `Scalar["ID", …]` says, so an integer literal and a string literal need a matching decoder.
+- A union or interface member's `__typename` comes from the value the resolver produced; harnesses that do not add it must use `resolver.tagged` or return JSON with `__typename` set.
 
 - `.suspending` resolvers run under a service identity; snapshots carry the principal and claims,
   never caller credentials. A resolver that needs live caller credentials cannot suspend.

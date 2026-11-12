@@ -1,5 +1,6 @@
 package net.andimiller.torpor.examples.esi
 
+import cats.data.NonEmptyChain
 import cats.effect.IO
 import io.circe.Json
 import net.andimiller.torpor.explain.Explain
@@ -16,22 +17,24 @@ import org.http4s.dsl.io.*
   */
 object ExplainRoute {
 
+  private val badBody = "body must be JSON with a 'query' string\n"
+
+  private def renderProblems[E](problems: NonEmptyChain[E])(render: E => String): String =
+    problems.toChain.toList.map(render).mkString("\n") + "\n"
+
   def routes(schema: Schema): HttpRoutes[IO] = HttpRoutes.of[IO] { case req @ POST -> Root / "explain" =>
     req.as[Json].attempt.flatMap {
-      case Left(_)     => BadRequest("body must be JSON with a 'query' string\n")
+      case Left(_)     => BadRequest(badBody)
       case Right(body) =>
-        body.hcursor.get[String]("query") match {
-          case Left(_)      => BadRequest("body must be JSON with a 'query' string\n")
-          case Right(query) =>
-            Executable.validate(schema, query, body.hcursor.get[String]("operationName").toOption) match {
-              case Left(errors)     => Ok(errors.toChain.toList.map(_.render).mkString("\n") + "\n")
-              case Right(validated) =>
-                Planner.build(schema, validated) match {
-                  case Left(problems) => Ok(problems.toChain.toList.map(_.render).mkString("\n") + "\n")
-                  case Right(plan)    => Ok(Explain.mermaid(plan) + "\n\n" + Explain.report(plan) + "\n")
-                }
-            }
-        }
+        val explained = for {
+          query     <- body.hcursor.get[String]("query").left.map(_ => badBody)
+          validated <- Executable
+                         .validate(schema, query, body.hcursor.get[String]("operationName").toOption)
+                         .left
+                         .map(renderProblems(_)(_.render))
+          plan      <- Planner.build(schema, validated).left.map(renderProblems(_)(_.render))
+        } yield Explain.mermaid(plan) + "\n\n" + Explain.report(plan) + "\n"
+        Ok(explained.merge)
     }
   }
 }

@@ -26,16 +26,18 @@ final case class Plan(rootType: String, roots: SelectionSet, nodes: List[PlanNod
     def selectionDepth(selectionSet: SelectionSet): Int =
       selectionSet.selections
         .map {
-          case InlineField(_, _, selections) => 1 + selectionDepth(selections)
-          case NodeField(_, _, id)           => 1 + nodeDepth(id)
+          case InlineField(_, _, selections, _, _) => 1 + selectionDepth(selections)
+          case NodeField(_, _, id, _, _)           => 1 + nodeDepth(id)
+          case TypeNameField(_, _)                 => 1
         }
         .maxOption
         .getOrElse(0)
 
     roots.selections
       .map {
-        case InlineField(_, _, selections) => 1 + selectionDepth(selections)
-        case NodeField(_, _, id)           => 1 + nodeDepth(id)
+        case InlineField(_, _, selections, _, _) => 1 + selectionDepth(selections)
+        case NodeField(_, _, id, _, _)           => 1 + nodeDepth(id)
+        case TypeNameField(_, _)                 => 1
       }
       .maxOption
       .getOrElse(0)
@@ -45,8 +47,9 @@ final case class Plan(rootType: String, roots: SelectionSet, nodes: List[PlanNod
   def fieldCount: Int = {
     def of(selectionSet: SelectionSet): Int =
       selectionSet.selections.map {
-        case InlineField(_, _, selections) => 1 + of(selections)
-        case NodeField(_, _, _)            => 1
+        case InlineField(_, _, selections, _, _) => 1 + of(selections)
+        case NodeField(_, _, _, _, _)            => 1
+        case TypeNameField(_, _)                 => 1
       }.sum
 
     of(roots) + nodes.map(node => of(node.selectionSet)).sum
@@ -96,12 +99,35 @@ object SelectionSet {
 
 sealed trait Selection {
   def responseKey: String
+
+  /** Concrete object type names this selection applies to, for inline and named fragments on unions and interfaces. An
+    * empty list means every type, so ordinary object selections carry no branching.
+    */
+  def appliesTo: List[String]
 }
 
 /** A field read straight off the value the parent node produced: a scalar, an object field declared by the type's own
-  * source, or `__typename`. `selections` is empty for scalars.
+  * source, or `__typename`. `selections` is empty for scalars. `tpe` is the field's declared type, which response
+  * assembly needs for null bubbling.
   */
-final case class InlineField(responseKey: String, field: String, selections: SelectionSet) extends Selection
+final case class InlineField(
+    responseKey: String,
+    field: String,
+    selections: SelectionSet,
+    tpe: TypeRef = TypeRef.Named("Unknown"),
+    appliesTo: List[String] = Nil
+) extends Selection
 
 /** A field that needs its own batch call, provided by the child node. */
-final case class NodeField(responseKey: String, field: String, node: NodeId) extends Selection
+final case class NodeField(
+    responseKey: String,
+    field: String,
+    node: NodeId,
+    tpe: TypeRef = TypeRef.Named("Unknown"),
+    appliesTo: List[String] = Nil
+) extends Selection
+
+/** `__typename`, answered from the value when the resolver declared one, otherwise from the static type. */
+final case class TypeNameField(responseKey: String, staticName: String) extends Selection {
+  def appliesTo: List[String] = Nil
+}

@@ -59,7 +59,7 @@ lazy val testkit = (project in file("modules/testkit"))
   .dependsOn(core, schema)
   .settings(commonSettings)
   .settings(
-    name := "torpor-testkit",
+    name                                   := "torpor-testkit",
     libraryDependencies += "org.scalameta" %% "munit" % munitVersion
   )
 
@@ -96,6 +96,18 @@ lazy val explain = (project in file("modules/explain"))
   .settings(
     name                                   := "torpor-explain",
     libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test
+  )
+
+// Relay connections: an optional helper, no core change. A helper module so every adopter does not rewrite it.
+lazy val relay = (project in file("modules/relay"))
+  .dependsOn(core)
+  .settings(commonSettings)
+  .settings(
+    name := "torpor-relay",
+    libraryDependencies ++= Seq(
+      "io.circe"      %% "circe-core" % circeVersion,
+      "org.scalameta" %% "munit"      % munitVersion % Test
+    )
   )
 
 lazy val http = (project in file("modules/http"))
@@ -136,7 +148,7 @@ lazy val examplesSharedEsi = (project in file("examples/shared-esi"))
     )
   )
 
-lazy val esi = (project in file("examples/esi"))
+lazy val esi        = (project in file("examples/esi"))
   .dependsOn(core, schema, source, http, macros, explain, examplesSharedEsi)
   .settings(commonSettings)
   .settings(
@@ -176,15 +188,29 @@ lazy val docs = (project in file("docs-mdoc"))
   .enablePlugins(MdocPlugin)
   .settings(commonSettings)
   .settings(
-    name           := "torpor-docs",
-    publish / skip := true,
-    mdocIn         := (ThisBuild / baseDirectory).value / "doc-src",
+    name                                := "torpor-docs",
+    publish / skip                      := true,
+    mdocIn                              := (ThisBuild / baseDirectory).value / "doc-src",
     libraryDependencies += "org.http4s" %% "http4s-ember-server" % http4sVersion,
-    mdocOut        := (ThisBuild / baseDirectory).value
+    mdocOut                             := (ThisBuild / baseDirectory).value
   )
 
 lazy val root = (project in file("."))
-  .aggregate(core, schema, macros, source, snapshot, explain, http, conformance, testkit, examplesSharedEsi, esi, esiCaliban)
+  .aggregate(
+    core,
+    schema,
+    macros,
+    source,
+    snapshot,
+    explain,
+    relay,
+    http,
+    conformance,
+    testkit,
+    examplesSharedEsi,
+    esi,
+    esiCaliban
+  )
   .settings(
     name           := "torpor",
     publish / skip := true

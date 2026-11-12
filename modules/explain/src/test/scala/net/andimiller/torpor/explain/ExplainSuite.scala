@@ -11,8 +11,8 @@ class ExplainSuite extends munit.FunSuite {
     Nil,
     SelectionSet(
       List(
-        InlineField("name", "name", SelectionSet.empty),
-        NodeField("owner", "owner", NodeId("n1"))
+        InlineField("name", "name", SelectionSet.empty, TypeRef.NonNull(TypeRef.Named("String"))),
+        NodeField("owner", "owner", NodeId("n1"), TypeRef.Named("Owner"))
       )
     ),
     Nil,
@@ -23,11 +23,12 @@ class ExplainSuite extends munit.FunSuite {
     "owners",
     FieldCoordinate("Pet", "owner"),
     Nil,
-    SelectionSet(List(InlineField("name", "name", SelectionSet.empty))),
+    SelectionSet(List(InlineField("name", "name", SelectionSet.empty, TypeRef.NonNull(TypeRef.Named("String"))))),
     List(NodeId("n0")),
     2
   )
-  private val plan  = Plan("Query", SelectionSet(List(NodeField("pets", "pets", NodeId("n0")))), List(pets, owner))
+  private val plan  =
+    Plan("Query", SelectionSet(List(NodeField("pets", "pets", NodeId("n0"), TypeRef.Named("Pet")))), List(pets, owner))
 
   test("mermaid names each call by source and coordinate, and draws key flow") {
     val mermaid = Explain.mermaid(plan)
