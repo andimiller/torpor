@@ -146,12 +146,15 @@ final class Durable[F[_]: Concurrent](
         torpor.resolverFor(node.source, node.field) match {
           case Some(Resolver.Suspending(_, resumeFn)) =>
             attemptResume(resumeFn(handle, payload)).flatMap {
-              case Right(Step.Complete(json))  =>
+              case Right(Step.Complete(resolved)) =>
+                val path = pathOf(rootKeys.get(id))
                 Concurrent[F].pure(
-                  StepResult.Complete(NodeResult(List(pathOf(rootKeys.get(id)) -> json), cats.data.Chain.empty))
+                  StepResult.Complete(
+                    NodeResult(List(path -> resolved.json), cats.data.Chain.empty, Map(path -> resolved.value))
+                  )
                 )
-              case Right(Step.Suspend(handle)) => Concurrent[F].pure(StepResult.Suspend(handle))
-              case Left(t)                     =>
+              case Right(Step.Suspend(handle))    => Concurrent[F].pure(StepResult.Suspend(handle))
+              case Left(t)                        =>
                 // resume failures are client-visible too, so they go through the same mapper as fresh runs
                 torpor.hooks.onError(node.field, t).map { error =>
                   StepResult.Complete(
@@ -170,8 +173,8 @@ final class Durable[F[_]: Concurrent](
 
   /** Resume can throw synchronously too (a handle that will not decode), so both channels are turned into errors. */
   private def attemptResume(
-      thunk: => F[Step[Json, Json]]
-  ): F[Either[Throwable, Step[Json, Json]]]                      =
+      thunk: => F[Step[Resolved, Json]]
+  ): F[Either[Throwable, Step[Resolved, Json]]]                  =
     try thunk.attempt
     catch { case t: Throwable => Concurrent[F].pure(Left(t)) }
 
