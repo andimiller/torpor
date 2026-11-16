@@ -30,6 +30,9 @@ object LinkedPets {
 final case class LinkedPet(id: String, name: String, ownerId: String) derives Encoder.AsObject, Decoder
 final case class LinkedOwner(id: String, name: String) derives Encoder.AsObject
 
+/** A key type that encodes, for batching and hooks, but has no decoder. */
+final case class OwnerKey(value: String) derives Encoder.AsObject
+
 /** A consumer needs only the fields it reads, so another context can decode the same parent more narrowly. */
 final case class HasOwner(ownerId: String) derives Decoder
 
@@ -63,6 +66,28 @@ final class LinkCheckSuite extends munit.CatsEffectSuite {
     )
 
     Torpor[IO](petsSource, narrow)
+  }
+
+  test("a batch key needs no decoder") {
+    val byOwnerId = Source[IO]("owners", owners)(
+      resolver
+        .field[IO](owners.Pet.owner)
+        .key((pet: LinkedPet) => OwnerKey(pet.ownerId))
+        .batch((_, ids: NonEmptyList[OwnerKey]) =>
+          IO.pure(ids.toList.map(id => id -> LinkedOwner(id.value, "Ada")).toMap)
+        )
+    )
+
+    val torpor = Torpor[IO](petsSource, byOwnerId)
+    val result = for {
+      schema   <- IO.fromEither(torpor.schema.left.map(e => new RuntimeException(e.toString)))
+      response <- torpor.query(schema, """{ pet(id: "p1") { owner { id } } }""") match {
+                    case Left(error) => IO.raiseError(new RuntimeException(error.render.mkString("; ")))
+                    case Right(run)  => run
+                  }
+    } yield response.toJson.noSpaces
+
+    result.map(json => assertEquals(json, """{"data":{"pet":{"owner":{"id":"o1"}}}}"""))
   }
 
   test("a producer without the field a consumer reads does not compile") {
