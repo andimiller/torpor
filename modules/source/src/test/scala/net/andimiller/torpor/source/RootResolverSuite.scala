@@ -11,7 +11,7 @@ final class RootResolverSuite extends munit.CatsEffectSuite {
 
   private def run(resolver: FieldResolver[IO, ?], arguments: Argument*): IO[Json] =
     resolver.entry match {
-      case (_, Resolver.Root(run)) => run(arguments.toList)
+      case (_, Resolver.Root(run)) => run(arguments.toList).map(_.json)
       case (coordinate, other)     => IO(fail(s"${coordinate.render} registered $other, not a root resolver"))
     }
 

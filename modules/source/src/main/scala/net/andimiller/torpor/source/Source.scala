@@ -10,6 +10,8 @@ import net.andimiller.torpor.core.{
   FieldCoordinate,
   InvalidInputException,
   Key,
+  Parent,
+  Resolved,
   Resolver,
   Sdl,
   Step
@@ -265,34 +267,26 @@ object resolver {
   private def argumentsJson(arguments: List[Argument]): Json =
     Json.obj(arguments.map(a => a.name -> a.value.toJson): _*)
 
+  private def resolved[B: Encoder](value: B): Resolved       = Resolved(Encoder[B].apply(value), value)
+
   private def rootEntry[F[_]: Functor, A: Decoder, B: Encoder](
       coordinate: FieldCoordinate,
       run: A => F[B]
-  ): (FieldCoordinate, Resolver[F])                          =
-    coordinate -> Resolver.Root { arguments =>
-      Decoder[A].decodeJson(argumentsJson(arguments)) match {
-        case Left(error)    => throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
-        case Right(decoded) => run(decoded).map(Encoder[B].apply)
-      }
-    }
+  ): (FieldCoordinate, Resolver[F]) =
+    coordinate -> Resolver.Root(arguments => run(decodeArguments[A](coordinate, arguments)).map(resolved(_)))
 
   private def suspendingEntry[F[_]: Functor, A: Decoder, H: Encoder: Decoder, B: Encoder](
       coordinate: FieldCoordinate,
       start: A => F[Step[B, H]],
       resume: (H, Json) => F[Step[B, H]]
   ): (FieldCoordinate, Resolver[F]) = {
-    def encoded(step: F[Step[B, H]]): F[Step[Json, Json]] = step.map {
-      case Step.Complete(value) => Step.Complete(Encoder[B].apply(value))
+    def encoded(step: F[Step[B, H]]): F[Step[Resolved, Json]] = step.map {
+      case Step.Complete(value) => Step.Complete(resolved(value))
       case Step.Suspend(handle) => Step.Suspend(Encoder[H].apply(handle))
     }
 
     coordinate -> Resolver.Suspending(
-      start = arguments =>
-        Decoder[A].decodeJson(argumentsJson(arguments)) match {
-          case Left(error)    =>
-            throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
-          case Right(decoded) => encoded(start(decoded))
-        },
+      start = arguments => encoded(start(decodeArguments[A](coordinate, arguments))),
       resume = (handle, payload) =>
         parser.parse(handle.noSpaces).flatMap(Decoder[H].decodeJson) match {
           case Left(error)    => throw new InvalidInputException(s"cannot decode handle for ${coordinate.render}: $error")
@@ -310,15 +304,17 @@ object resolver {
       run: (A, NonEmptyList[K]) => F[Map[K, V]]
   ): (FieldCoordinate, Resolver[F]) =
     coordinate -> Resolver.Batch[F, K](
-      key = value =>
-        Decoder[P].decodeJson(value) match {
-          case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
-          case Right(p)    => Right(extract(p).map(key => Key(keyString(key), key)))
-        },
+      key = parent => parentAs[P](coordinate, parent).map(extract(_).map(key => Key(keyString(key), key))),
       batch = (arguments, keys) =>
         run(decodeArguments[A](coordinate, arguments), keys)
-          .map(_.map { case (key, value) => keyString(key) -> Encoder[V].apply(value) })
+          .map(_.map { case (key, value) => keyString(key) -> resolved(value) })
     )
+
+  private def parentAs[P: Decoder](coordinate: FieldCoordinate, parent: Parent): Either[String, P] =
+    Decoder[P]
+      .decodeJson(parent.json)
+      .left
+      .map(error => s"cannot decode parent value for ${coordinate.render}: $error")
 
   private def decodeArguments[A: Decoder](
       coordinate: FieldCoordinate,

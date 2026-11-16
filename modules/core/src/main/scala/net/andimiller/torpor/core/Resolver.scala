@@ -3,15 +3,14 @@ package net.andimiller.torpor.core
 import cats.data.NonEmptyList
 import io.circe.Json
 
-/** What the executor needs to run one plan node. The SPI is JSON-shaped on purpose: the plan is JSON-shaped, snapping
-  * happens inside the executor, and this keeps `torpor-core` free of the schema/parser modules.
+/** What the executor needs to run one plan node. This keeps `torpor-core` free of the schema/parser modules.
   *
-  * `torpor-source` builds these from typed resolvers; nothing in the executor sees a user type.
+  * `torpor-source` builds these from typed resolvers; the executor holds their values as `Any` and never looks inside.
   */
 enum Resolver[F[_]] {
 
   /** A root field: one call, no input values. Arguments are already literal (the planner substituted variables). */
-  case Root(run: List[Argument] => F[Json])
+  case Root(run: List[Argument] => F[Resolved])
 
   /** A keyed field: extract a key from each parent value, then one batch call for all of them.
     *
@@ -23,8 +22,8 @@ enum Resolver[F[_]] {
     * `null` without a call. The executor never names `K`: it only passes what `key` returns to `batch`.
     */
   case Batch[F[_], K](
-      key: Json => Either[String, Option[Key[K]]],
-      batch: (List[Argument], NonEmptyList[K]) => F[Map[String, Json]]
+      key: Parent => Either[String, Option[Key[K]]],
+      batch: (List[Argument], NonEmptyList[K]) => F[Map[String, Resolved]]
   ) extends Resolver[F]
 
   /** A root field that can park the run. `start` either completes or suspends with a handle; `resume` gets that handle
@@ -33,10 +32,23 @@ enum Resolver[F[_]] {
     * Handles and payloads are JSON because they have to survive a snapshot round trip; the typed DSL encodes them.
     */
   case Suspending(
-      start: List[Argument] => F[Step[Json, Json]],
-      resume: (Json, Json) => F[Step[Json, Json]]
+      start: List[Argument] => F[Step[Resolved, Json]],
+      resume: (Json, Json) => F[Step[Resolved, Json]]
   )
 }
 
+/** What a resolver produced: its JSON, for the response and for snapshots, and its Scala value, for the keyed fields
+  * that read it later in the same run.
+  */
+final case class Resolved(json: Json, value: Any)
+
+/** The parent value that a keyed field reads its key from. `produced` is there when a resolver in this run produced the
+  * value itself; it is absent for a value nested inside another value, and for one restored from a snapshot.
+  */
+final case class Parent(json: Json, produced: Option[Produced])
+
 /** A batch key: its JSON encoding, which identifies it, and the Scala value the resolver extracted. */
 final case class Key[K](encoded: String, value: K)
+
+/** A value as the resolver at `by` produced it, before encoding. */
+final case class Produced(by: FieldCoordinate, value: Any)
