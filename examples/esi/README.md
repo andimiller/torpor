@@ -31,11 +31,12 @@ Each source's SDL is a `schema"""…"""` literal, so it is parsed and validated 
 take their coordinates from the same value (`characters.Query.character`), and the text goes straight into
 `Source[IO]("characters", characters)(…)`. Merged at startup, the whole schema is also what a golden test would compare.
 
-Each source's type records which fields its SDL needs resolved and what its resolvers produce and decode, so
+Each source's type records which fields its SDL needs resolved and what its resolvers produce and read, so
 `Torpor[IO](charactersSource, universeSource, routesSource)` checks two things when it compiles. Every source resolves exactly
 the fields it must: commenting out the `Corporation.alliance` resolver is a compile error. And the sources link:
-`Character.corporation` decodes each character as `EsiCharacter` to read `corporationId`, so a `characters` source
-producing a type without that field does not compile.
+`Character.corporation` reads each character as `EsiCharacter`, the type that `characters` produces, so it gets the
+`EsiCharacter` that `characters` made, not its JSON. A key that reads a narrower case class gets one built from the
+produced value's fields, and a `characters` source producing a type without `corporationId` does not compile.
 
 Three sources: `characters` owns `Character` and the root lookup; `routes` owns the route lookup and the two types it
 returns; `universe` owns everything that hydrates them — `corporation`, `alliance`, `SolarSystem.constellation`,
@@ -43,8 +44,8 @@ returns; `universe` owns everything that hydrates them — `corporation`, `allia
 declared by `extend type` in another source needs its own node, so `extend` is what makes hydration lazy. `{ character(id:
 1) { name } }` never calls the corporations endpoint.
 
-`corporationId`, `allianceId`, `constellationId` and `regionId` are carrier fields: they travel in the JSON between
-nodes and never appear in the SDL. A corporation with no alliance returns `null`, not an error, and so does a route ESI
+`corporationId`, `allianceId`, `constellationId` and `regionId` are carrier fields: they travel in the Scala values
+between nodes and never appear in the SDL. A corporation with no alliance returns `null`, not an error, and so does a route ESI
 does not know.
 
 ## ESI calls

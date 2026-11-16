@@ -69,11 +69,12 @@ val universeSource = Source[IO]("universe", universe)(
     .batch((_, ids: NonEmptyList[Long]) => esi.corporations(ids))
 )
 
-// 5. Assemble. Each source's type records the fields its SDL must resolve and what its resolvers produce and
-//    decode, so this compile-time check proves every source resolves exactly its required fields (here
-//    `Query.character` and `Character.corporation`) and that the sources link: `Character.corporation` reads
-//    `corporationId` from the characters the other source produces. `startup` merges the fragments, repeats the
-//    coverage check against the merged schema, and raises one exception listing every problem.
+// 5. Assemble. Each source's type records which fields its SDL needs resolved and what its resolvers produce and
+//    read, so this checks, when it compiles, that every source resolves exactly the fields it must (here
+//    `Query.character` and `Character.corporation`), and that the sources link: `Character.corporation` reads each
+//    character as `EsiCharacter`, which is what `characters` produces, so it gets the produced value, not its JSON.
+//    `startup` merges the fragments, repeats the coverage check against the merged schema, and raises one exception
+//    listing every problem. Running it is what makes the schema servable.
 val started: IO[(Torpor[IO], Schema)] = Torpor[IO](charactersSource, universeSource).startup
 
 // 6. Mount into a server: one http4s route, the same one for every schema.
