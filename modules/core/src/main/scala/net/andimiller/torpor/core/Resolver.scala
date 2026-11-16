@@ -18,12 +18,13 @@ enum Resolver[F[_]] {
     * Arguments are the node's own, already literal and shared by every parent in the node (the planner gives each
     * distinct argument set its own node), so the batch sees them once.
     *
-    * Keys are strings because a batch is keyed by equality and the key has to survive a JSON round trip. The typed DSL
-    * encodes them with circe; a key that cannot round-trip is a registration error, not a query error.
+    * A batch is keyed by each key's JSON encoding, which is also what `Hooks.authorize` sees; `batch` gets the keys as
+    * the Scala values `key` extracted, so they never need to decode. `None` is a parent with no key, which resolves to
+    * `null` without a call.
     */
   case Batch(
-      key: Json => Either[String, String],
-      batch: (List[Argument], NonEmptyList[String]) => F[Map[String, Json]]
+      key: Json => Either[String, Option[Key]],
+      batch: (List[Argument], NonEmptyList[Any]) => F[Map[String, Json]]
   )
 
   /** A root field that can park the run. `start` either completes or suspends with a handle; `resume` gets that handle
@@ -36,3 +37,6 @@ enum Resolver[F[_]] {
       resume: (Json, Json) => F[Step[Json, Json]]
   )
 }
+
+/** A batch key: its JSON encoding, which identifies it, and the Scala value the resolver extracted. */
+final case class Key(encoded: String, value: Any)
