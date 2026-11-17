@@ -9,7 +9,6 @@ import net.andimiller.torpor.core.{
   Arguments,
   FieldCoordinate,
   InvalidInputException,
-  Key,
   Parent,
   Resolved,
   Resolver,
@@ -217,7 +216,6 @@ object resolver {
     inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
         Functor[F],
         Decoder[P],
-        Encoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
       FieldResolver(
@@ -225,7 +223,6 @@ object resolver {
           summon[Functor[F]],
           Arguments.decoder[A],
           summon[Decoder[P]],
-          summon[Encoder[K]],
           summon[Encoder[V]]
         )
       )
@@ -248,7 +245,6 @@ object resolver {
           Functor[F],
           Decoder[A],
           Decoder[P],
-          Encoder[K],
           Encoder[V]
       ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
         FieldResolver(keyedEntry[F, A, P, K, V](coordinate, extract, run))
@@ -279,7 +275,6 @@ object resolver {
     inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
         Functor[F],
         Decoder[P],
-        Encoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
       FieldResolver(
@@ -287,7 +282,6 @@ object resolver {
           summon[Functor[F]],
           Arguments.decoder[A],
           summon[Decoder[P]],
-          summon[Encoder[K]],
           summon[Encoder[V]]
         )
       )
@@ -332,20 +326,18 @@ object resolver {
     )
   }
 
-  /** The executor dedupes keys by their encoding, which `Hooks.authorize` also sees, and hands the Scala keys back to
-    * `run` as they are, so a key never needs to decode.
-    */
-  private def keyedEntry[F[_]: Functor, A: Decoder, P: Decoder, K: Encoder, V: Encoder](
+  /** The executor dedupes keys by Scala equality and hands them back to `run` as they are, so a key needs no codec. */
+  private def keyedEntry[F[_]: Functor, A: Decoder, P: Decoder, K, V: Encoder](
       coordinate: FieldCoordinate,
       extract: P => Option[K],
       run: (A, NonEmptyList[K]) => F[Map[K, V]]
   ): (FieldCoordinate, Links.ByProducer => Resolver[F]) =
     coordinate -> (links =>
       Resolver.Batch[F, K](
-        key = parent => parentAs[P](coordinate, links, parent).map(extract(_).map(key => Key(keyString(key), key))),
+        key = parent => parentAs[P](coordinate, links, parent).map(extract),
         batch = (arguments, keys) =>
           run(decodeArguments[A](coordinate, arguments), keys)
-            .map(_.map { case (key, value) => keyString(key) -> resolved(value) })
+            .map(_.map { case (key, value) => key -> resolved(value) })
       )
     )
 
@@ -375,6 +367,4 @@ object resolver {
         throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
       case Right(decoded) => decoded
     }
-
-  private def keyString[K: Encoder](key: K): String = Encoder[K].apply(key).noSpaces
 }

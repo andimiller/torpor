@@ -43,8 +43,8 @@ object PrivatePet {
 
 final case class LinkedAdoption(pet: LinkedPet) derives Encoder.AsObject
 
-/** A key type that encodes, for batching and hooks, but has no decoder. */
-final case class OwnerKey(value: String) derives Encoder.AsObject
+/** A key type with no codec: the executor matches keys by Scala equality. */
+final case class OwnerKey(value: String)
 
 /** A producer whose shape has no `ownerId`, and one where it has the wrong type. */
 final case class PetSummary(id: String, name: String) derives Encoder.AsObject
@@ -134,7 +134,7 @@ final class LinksSuite extends munit.CatsEffectSuite {
       .map(json => assertEquals(json, """{"data":{"pet":{"owner":{"name":"owner of o1"}}}}"""))
   }
 
-  test("a batch key needs no decoder") {
+  test("a batch key needs no codec") {
     val byOwnerId = Source[IO]("owners", owners)(
       resolver
         .field[IO](owners.Pet.owner)

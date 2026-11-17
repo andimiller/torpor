@@ -17,13 +17,13 @@ enum Resolver[F[_]] {
     * Arguments are the node's own, already literal and shared by every parent in the node (the planner gives each
     * distinct argument set its own node), so the batch sees them once.
     *
-    * A batch is keyed by each key's JSON encoding, which is also what `Hooks.authorize` sees; `batch` gets the keys as
-    * the Scala values `key` extracted, so they never need to decode. `None` is a parent with no key, which resolves to
-    * `null` without a call. The executor never names `K`: it only passes what `key` returns to `batch`.
+    * The executor calls `batch` once with the distinct keys, by Scala equality, and matches each result to its parents
+    * by the same equality, so a key needs no codec. `None` is a parent with no key, which resolves to `null` without a
+    * call. The executor never names `K`: it only passes what `key` returns to `batch`.
     */
   case Batch[F[_], K](
-      key: Parent => Either[String, Option[Key[K]]],
-      batch: (List[Argument], NonEmptyList[K]) => F[Map[String, Resolved]]
+      key: Parent => Either[String, Option[K]],
+      batch: (List[Argument], NonEmptyList[K]) => F[Map[K, Resolved]]
   ) extends Resolver[F]
 
   /** A root field that can park the run. `start` either completes or suspends with a handle; `resume` gets that handle
@@ -46,9 +46,6 @@ final case class Resolved(json: Json, value: Any)
   * value itself; it is absent for a value nested inside another value, and for one restored from a snapshot.
   */
 final case class Parent(json: Json, produced: Option[Produced])
-
-/** A batch key: its JSON encoding, which identifies it, and the Scala value the resolver extracted. */
-final case class Key[K](encoded: String, value: K)
 
 /** A value as the resolver at `by` produced it, before encoding. */
 final case class Produced(by: FieldCoordinate, value: Any)

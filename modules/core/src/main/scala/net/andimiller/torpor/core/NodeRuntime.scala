@@ -91,19 +91,18 @@ object NodeRuntime {
         import resolver.{batch, key}
         val positions = parent.toList.flatMap(result => inputPositions(plan, node, result))
 
-        val extracted: List[(List[PathSegment], Either[FieldError, Option[Key[k]]])] =
+        val extracted: List[(List[PathSegment], Either[FieldError, Option[k]])] =
           positions.map { case (path, parent) =>
             if (parent.json.isNull) (path, Right(None))
             else (path, key(parent).left.map(message => FieldError(message, path, FieldError.InvalidParentValue)))
           }
 
-        // one call per distinct encoding; the batch gets the Scala keys
-        val keys                                              =
-          extracted.collect { case (_, Right(Some(k))) => k }.distinctBy(_.encoded).map(_.value)
-        val call: F[Either[Throwable, Map[String, Resolved]]] =
+        // one call per distinct key, by Scala equality
+        val keys                                         = extracted.collect { case (_, Right(Some(k))) => k }.distinct
+        val call: F[Either[Throwable, Map[k, Resolved]]] =
           try
             NonEmptyList.fromList(keys) match {
-              case None      => Concurrent[F].pure(Right(Map.empty[String, Resolved]))
+              case None      => Concurrent[F].pure(Right(Map.empty[k, Resolved]))
               case Some(nel) => batch(node.args, nel).attempt
             }
           catch {
@@ -123,23 +122,22 @@ object NodeRuntime {
             }
 
           case Right(results) =>
-            authorize(hooks, node, results.map { case (k, resolved) => k -> resolved.json }).map { verdicts =>
+            // the hook sees each value under an id for this call only, so it needs no encoding of the key
+            val ids: Map[k, String] = results.keys.zipWithIndex.map { case (k, id) => k -> id.toString }.toMap
+            authorize(hooks, node, results.map { case (k, resolved) => ids(k) -> resolved.json }).map { verdicts =>
               val values: List[(List[PathSegment], Option[Output], Chain[FieldError])] = extracted.map {
                 case (path, Left(error))    => (path, None, Chain.one(error))
                 case (path, Right(None))    => (path, None, Chain.empty[FieldError])
                 case (path, Right(Some(k))) =>
-                  (verdicts.get(k.encoded), results.get(k.encoded)) match {
-                    case (Some(Left(error)), _)               =>
-                      (path, None, Chain.one(FieldError(error.message, path, error.code)))
-                    case (Some(Right(value)), Some(resolved)) => (path, Some(replaced(resolved, value)), Chain.empty)
-                    case (Some(Right(value)), None)           => (path, Some(Output(value, None)), Chain.empty)
-                    case (None, Some(resolved))               => (path, Some(output(resolved)), Chain.empty[FieldError])
-                    case (None, None)                         =>
-                      (
-                        path,
-                        None,
-                        Chain.one(FieldError(s"no result for key '${k.encoded}'", path, FieldError.MissingKey))
-                      )
+                  results.get(k) match {
+                    case None           =>
+                      (path, None, Chain.one(FieldError(s"no result for key '$k'", path, FieldError.MissingKey)))
+                    case Some(resolved) =>
+                      verdicts.get(ids(k)) match {
+                        case Some(Left(error))  => (path, None, Chain.one(FieldError(error.message, path, error.code)))
+                        case Some(Right(value)) => (path, Some(replaced(resolved, value)), Chain.empty[FieldError])
+                        case None               => (path, Some(output(resolved)), Chain.empty[FieldError])
+                      }
                   }
               }
               NodeOutcome.Completed(
