@@ -1,10 +1,19 @@
 package net.andimiller.torpor.source
 
-import cats.{Applicative, Functor}
+import cats.Functor
 import cats.data.NonEmptyList
 import cats.syntax.all._
 import io.circe.{Decoder, Encoder, Json, parser}
-import net.andimiller.torpor.core.{Argument, Arguments, FieldCoordinate, InvalidInputException, Resolver, Sdl, Step}
+import net.andimiller.torpor.core.{
+  Argument,
+  Arguments,
+  FieldCoordinate,
+  InvalidInputException,
+  Key,
+  Resolver,
+  Sdl,
+  Step
+}
 
 /** A source: an SDL fragment plus the resolvers that serve it.
   *
@@ -197,19 +206,17 @@ object resolver {
       * makes one call for `cohorts(first: 2)` rather than one per workspace.
       */
     inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
-        Applicative[F],
+        Functor[F],
         Decoder[P],
         Encoder[K],
-        Decoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
       FieldResolver(
-        keyedEntry[F, A, P, K, V](coordinate, extract, run)(using
-          summon[Applicative[F]],
+        keyedEntry[F, A, P, K, V](coordinate, (parent: P) => Some(extract(parent)), run)(using
+          summon[Functor[F]],
           Arguments.decoder[A],
           summon[Decoder[P]],
           summon[Encoder[K]],
-          summon[Decoder[K]],
           summon[Encoder[V]]
         )
       )
@@ -237,28 +244,23 @@ object resolver {
       extract: P => Option[K]
   ) {
     inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
-        Applicative[F],
+        Functor[F],
         Decoder[P],
         Encoder[K],
-        Decoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
       FieldResolver(
-        optionalKeyedEntry[F, A, P, K, V](coordinate, extract, run)(using
-          summon[Applicative[F]],
+        keyedEntry[F, A, P, K, V](coordinate, extract, run)(using
+          summon[Functor[F]],
           Arguments.decoder[A],
           summon[Decoder[P]],
           summon[Encoder[K]],
-          summon[Decoder[K]],
           summon[Encoder[V]]
         )
       )
   }
 
   // the erased resolvers the executor runs
-
-  /** Not a valid JSON key encoding, so it cannot collide with a real key: encoded keys start with a JSON token. */
-  private val AbsentKey = "\u0000absent"
 
   private def argumentsJson(arguments: List[Argument]): Json =
     Json.obj(arguments.map(a => a.name -> a.value.toJson): _*)
@@ -299,45 +301,23 @@ object resolver {
     )
   }
 
-  private def keyedEntry[F[_]: Applicative, A: Decoder, P: Decoder, K: Encoder: Decoder, V: Encoder](
-      coordinate: FieldCoordinate,
-      extract: P => K,
-      run: (A, NonEmptyList[K]) => F[Map[K, V]]
-  ): (FieldCoordinate, Resolver[F]) =
-    coordinate -> Resolver.Batch(
-      key = value =>
-        Decoder[P].decodeJson(value) match {
-          case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
-          case Right(p)    => Right(keyString(extract(p)))
-        },
-      batch = (arguments, keys) =>
-        run(decodeArguments[A](coordinate, arguments), keys.map(decodeKey[K](coordinate, _)))
-          .map(_.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) })
-    )
-
-  private def optionalKeyedEntry[F[_]: Applicative, A: Decoder, P: Decoder, K: Encoder: Decoder, V: Encoder](
+  /** The executor dedupes keys by their encoding, which `Hooks.authorize` also sees, and hands the Scala keys back to
+    * `run` as they are, so a key never needs to decode.
+    */
+  private def keyedEntry[F[_]: Functor, A: Decoder, P: Decoder, K: Encoder, V: Encoder](
       coordinate: FieldCoordinate,
       extract: P => Option[K],
       run: (A, NonEmptyList[K]) => F[Map[K, V]]
   ): (FieldCoordinate, Resolver[F]) =
-    coordinate -> Resolver.Batch(
+    coordinate -> Resolver.Batch[F, K](
       key = value =>
         Decoder[P].decodeJson(value) match {
           case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
-          case Right(p)    => Right(extract(p).fold(AbsentKey)(keyString(_)))
+          case Right(p)    => Right(extract(p).map(key => Key(keyString(key), key)))
         },
-      batch = (arguments, keys) => {
-        val decoded = decodeArguments[A](coordinate, arguments)
-        val present = keys.toList.filterNot(_ == AbsentKey).distinct
-        NonEmptyList.fromList(present) match {
-          case None      => Applicative[F].pure(Map(AbsentKey -> Json.Null))
-          case Some(nel) =>
-            run(decoded, nel.map(decodeKey[K](coordinate, _)))
-              .map(results =>
-                results.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) } + (AbsentKey -> Json.Null)
-              )
-        }
-      }
+      batch = (arguments, keys) =>
+        run(decodeArguments[A](coordinate, arguments), keys)
+          .map(_.map { case (key, value) => keyString(key) -> Encoder[V].apply(value) })
     )
 
   private def decodeArguments[A: Decoder](
@@ -351,11 +331,4 @@ object resolver {
     }
 
   private def keyString[K: Encoder](key: K): String = Encoder[K].apply(key).noSpaces
-
-  private def decodeKey[K: Decoder](coordinate: FieldCoordinate, encoded: String): K =
-    parser
-      .parse(encoded)
-      .toOption
-      .flatMap(Decoder[K].decodeJson(_).toOption)
-      .getOrElse(throw new InvalidInputException(s"cannot decode batch key '$encoded' for ${coordinate.render}"))
 }

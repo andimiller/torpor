@@ -89,20 +89,20 @@ object NodeRuntime {
             }
         }
 
-      case Resolver.Batch(key, batch) =>
+      // `k` names the batch's key type, so the keys that `key` extracts type-check as what `batch` takes
+      case resolver: Resolver.Batch[F, k] =>
+        import resolver.{batch, key}
         val positions = parent.toList.flatMap(result => inputPositions(plan, node, result))
 
-        val extracted: List[(List[PathSegment], Either[FieldError, Option[String]])] =
+        val extracted: List[(List[PathSegment], Either[FieldError, Option[Key[k]]])] =
           positions.map { case (path, value) =>
-            if (value.isNull) (path, Right(None): Either[FieldError, Option[String]])
-            else
-              key(value) match {
-                case Left(message) => (path, Left(FieldError(message, path, FieldError.InvalidParentValue)))
-                case Right(k)      => (path, Right(Some(k)))
-              }
+            if (value.isNull) (path, Right(None))
+            else (path, key(value).left.map(message => FieldError(message, path, FieldError.InvalidParentValue)))
           }
 
-        val keys                                          = extracted.collect { case (_, Right(Some(k))) => k }.distinct
+        // one call per distinct encoding; the batch gets the Scala keys
+        val keys                                          =
+          extracted.collect { case (_, Right(Some(k))) => k }.distinctBy(_.encoded).map(_.value)
         val call: F[Either[Throwable, Map[String, Json]]] =
           try
             NonEmptyList.fromList(keys) match {
@@ -131,17 +131,17 @@ object NodeRuntime {
                 case (path, Left(error))    => (path, Json.Null, Chain.one(error))
                 case (path, Right(None))    => (path, Json.Null, Chain.empty[FieldError])
                 case (path, Right(Some(k))) =>
-                  verdicts.get(k) match {
+                  verdicts.get(k.encoded) match {
                     case Some(Left(error))  => (path, Json.Null, Chain.one(FieldError(error.message, path, error.code)))
                     case Some(Right(value)) => (path, value, Chain.empty[FieldError])
                     case None               =>
-                      results.get(k) match {
+                      results.get(k.encoded) match {
                         case Some(json) => (path, json, Chain.empty[FieldError])
                         case None       =>
                           (
                             path,
                             Json.Null,
-                            Chain.one(FieldError(s"no result for key '$k'", path, FieldError.MissingKey))
+                            Chain.one(FieldError(s"no result for key '${k.encoded}'", path, FieldError.MissingKey))
                           )
                       }
                   }
