@@ -466,18 +466,22 @@ object Planner {
       * decoder.
       */
     private def coerce(value: Value, tpe: TypeRef, at: Origin, path: String): Option[Value] =
+      value match {
+        // null fits every nullable type, which is also how an input object's omitted fields arrive
+        case Value.NullValue if tpe.isNonNull =>
+          error(PlanErrorKind.InvalidValue, s"$path is non-null, but null was given", at)
+          None
+        case Value.NullValue                  => Some(Value.NullValue)
+        case present                          => coercePresent(present, tpe, at, path)
+      }
+
+    /** Coerces a value other than null, so only its type decides what it may be. */
+    private def coercePresent(value: Value, tpe: TypeRef, at: Origin, path: String): Option[Value] =
       tpe match {
-        case TypeRef.NonNull(inner) =>
-          value match {
-            case Value.NullValue =>
-              error(PlanErrorKind.InvalidValue, s"$path is non-null, but null was given", at)
-              None
-            case other           => coerce(other, inner, at, path)
-          }
+        case TypeRef.NonNull(inner) => coercePresent(value, inner, at, path)
 
         case TypeRef.ListOf(element) =>
           value match {
-            case Value.NullValue     => Some(Value.NullValue)
             case Value.ListValue(vs) =>
               val coerced = vs.map(v => coerce(v, element, at, path).getOrElse(Value.NullValue))
               Some(Value.ListValue(coerced))
