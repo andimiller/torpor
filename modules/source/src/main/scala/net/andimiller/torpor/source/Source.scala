@@ -229,6 +229,30 @@ object resolver {
           summon[Encoder[V]]
         )
       )
+
+    /** Decode the arguments as `A2` instead, such as a case class with domain types the SDL cannot express. */
+    def args[A2]: KeyedField.Decoding[F, T, N, A2, R, P, K] =
+      new KeyedField.Decoding(coordinate, (parent: P) => Some(extract(parent)))
+  }
+
+  object KeyedField {
+
+    /** A keyed field whose arguments decode with the `Decoder[A]` in scope. Because nothing here is typed from the SDL,
+      * one function can serve the same field on several types, such as every implementer of an interface.
+      */
+    final class Decoding[F[_], T <: String, N <: String, A, R <: String, P, K](
+        coordinate: FieldCoordinate,
+        extract: P => Option[K]
+    ) {
+      def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
+          Functor[F],
+          Decoder[A],
+          Decoder[P],
+          Encoder[K],
+          Encoder[V]
+      ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
+        FieldResolver(keyedEntry[F, A, P, K, V](coordinate, extract, run))
+    }
   }
 
   /** A keyed field whose key may be absent (a nullable foreign key). Absent keys are never sent to `batch`; they
@@ -267,6 +291,9 @@ object resolver {
           summon[Encoder[V]]
         )
       )
+
+    /** Decode the arguments as `A2` instead, such as a case class with domain types the SDL cannot express. */
+    def args[A2]: KeyedField.Decoding[F, T, N, A2, R, P, K] = new KeyedField.Decoding(coordinate, extract)
   }
 
   // the erased resolvers the executor runs
