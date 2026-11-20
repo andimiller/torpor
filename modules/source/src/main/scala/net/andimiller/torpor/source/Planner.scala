@@ -401,13 +401,18 @@ object Planner {
           }
       }
 
+    /** A variable declared with a nullable type may be given no value: the spec reads it as absent, not as an error. */
+    private def optional(variable: String): Boolean =
+      operation.variables.find(_.name == variable).exists(!_.tpe.isNonNull)
+
     /** Variables are resolved here, once, so the plan only ever holds literals. */
     private def substitute(value: Value, at: Origin): Value =
       value match {
         case Value.VariableValue(name) =>
           variables.get(name).orElse(operation.variables.find(_.name == name).flatMap(_.default)) match {
-            case Some(resolved) => resolved
-            case None           =>
+            case Some(resolved)         => resolved
+            case None if optional(name) => Value.NullValue
+            case None                   =>
               error(PlanErrorKind.MissingVariable, s"variable '$$$name' has no value", at)
               Value.NullValue
           }
@@ -436,8 +441,10 @@ object Planner {
                   .get(name)
                   .orElse(operation.variables.find(_.name == name).flatMap(_.default))
                   .orElse(spec.default) match {
-                  case Some(resolved) => Some(resolved)
-                  case None           =>
+                  case Some(resolved)         => Some(resolved)
+                  // the argument is left out, as if the query had not written it
+                  case None if optional(name) => None
+                  case None                   =>
                     error(PlanErrorKind.MissingVariable, s"variable '$$$name' has no value", argument.origin)
                     None
                 }
