@@ -152,16 +152,35 @@ object Planner {
         case field: FieldSelection =>
           if (included(field.directives)) {
             fieldDefinition(parent, field.name, field.origin).foreach { definition =>
-              collected += RawField(
-                field.responseKey,
-                field.name,
-                field.args,
-                field.selections,
-                field.origin,
-                definition,
-                parent.name,
-                inherited
-              )
+              // An implementer may serve an interface's field with a resolver, which the interface's own definition
+              // cannot say. So the field is planned once per type the value can be, as `... on T { field }` would be.
+              val implementers =
+                if (parent.kind == TypeKind.InterfaceType && field.name != "__typename")
+                  (if (inherited.nonEmpty) inherited else possibleTypes(parent.name)).flatMap(schema.types.get)
+                else Nil
+
+              // each definition the field is planned with, the type it is defined on, and the types it applies to
+              val plannedAs: List[(FieldDef, String, List[String])] =
+                if (implementers.isEmpty) List((definition, parent.name, inherited))
+                else
+                  implementers.flatMap { implementer =>
+                    fieldDefinition(implementer, field.name, field.origin).map { served =>
+                      (served, implementer.name, List(implementer.name))
+                    }
+                  }
+
+              plannedAs.foreach { case (served, condition, applies) =>
+                collected += RawField(
+                  responseKey = field.responseKey,
+                  name = field.name,
+                  args = field.args,
+                  selections = field.selections,
+                  origin = field.origin,
+                  definition = served,
+                  condition = condition,
+                  applies = applies
+                )
+              }
             }
           }
 
