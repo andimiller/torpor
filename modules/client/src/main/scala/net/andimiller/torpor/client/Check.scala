@@ -89,11 +89,22 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
 
   private def leaf(name: String, shape: Shape, path: String): List[String] =
     shape match {
-      case Shape.Leaf(scala) =>
+      case Shape.Trusted(_)         => Nil
+      case Shape.Leaf(scala)        =>
         leaves.get(name).filterNot(_.contains(scala)).toList.map { allowed =>
           s"$path is a $name in the schema, so it is written as ${allowed.toList.sorted.mkString(" or ")}, not $scala"
         }
-      case other             =>
+      // a literal is a string, unless the type is an enum: then each literal is one of its values
+      case Shape.Literals(literals) =>
+        schema.types.get(name).filter(_.kind == TypeKind.EnumType) match {
+          case None             => leaf(name, Shape.Leaf("String"), path)
+          case Some(definition) =>
+            val values = definition.enumValues.map(_.name)
+            literals.filterNot(values.contains).map { literal =>
+              s"$path is the enum $name in the schema, but \"$literal\" is not one of its values: ${values.mkString(", ")}"
+            }
+        }
+      case other                    =>
         List(s"$path is the scalar or enum $name in the schema, so it cannot be written as ${other.render}")
     }
 
@@ -113,6 +124,7 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
 
   private def inputValue(tpe: TypeRef, shape: Shape, path: String): List[String] =
     (tpe, shape) match {
+      case (_, Shape.Trusted(_))                     => Nil
       case (TypeRef.NonNull(of), other)              => inputValue(of, other, path)
       case (TypeRef.ListOf(of), Shape.Many(element)) => input(of, hasDefault = false, Some(element), s"$path[]")
       case (TypeRef.ListOf(_), other)                =>

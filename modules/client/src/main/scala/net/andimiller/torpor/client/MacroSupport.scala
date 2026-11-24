@@ -68,7 +68,19 @@ private[client] object MacroSupport {
   // collections that are not an `Iterable`, by the name of their class
   private val collections = Set("NonEmptyList", "NonEmptyVector", "NonEmptyChain", "NonEmptySeq", "Chain")
 
-  /** The shape of a type: see [[Shape]]. */
+  /** The string literals a type is a union of, if it is one: `"DOG"`, or `"DOG" | "CAT"`. */
+  def literals(using q: Quotes)(tpe: q.reflect.TypeRepr): Option[List[String]] = {
+    import q.reflect.*
+    tpe.dealias match {
+      case ConstantType(StringConstant(value)) => Some(List(value))
+      case OrType(left, right)                 => (literals(left), literals(right)).mapN(_ ++ _)
+      case _                                   => None
+    }
+  }
+
+  /** The shape of a type: see [[Shape]]. A value class is the shape of the one value it wraps, and an opaque type is
+    * taken on trust: its own codec decides.
+    */
   def shape(using q: Quotes)(tpe: q.reflect.TypeRepr): Shape = {
     import q.reflect.*
 
@@ -79,6 +91,16 @@ private[client] object MacroSupport {
       val dealiased = tpe.dealias
       val symbol    = dealiased.typeSymbol
       dealiased match {
+        case _ if literals(dealiased).isDefined                                                       =>
+          Shape.Literals(literals(dealiased).get)
+        // an opaque type cannot be seen through from here, so its own codec decides what it writes
+        case _ if symbol.flags.is(Flags.Opaque)                                                       =>
+          Shape.Trusted(symbol.name)
+        // a value class wraps one value, such as an id: it is written as that value, by its own codec
+        case _
+            if symbol.isClassDef && symbol.flags.is(Flags.Case) && dealiased <:< TypeRepr.of[AnyVal] &&
+              symbol.caseFields.size == 1 =>
+          of(dealiased.memberType(symbol.caseFields.head), within)
         // `Some(1)` and `None` are options too
         case _ if dealiased <:< TypeRepr.of[Option[Any]]                                              =>
           dealiased.baseType(optionSymbol) match {

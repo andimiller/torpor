@@ -52,17 +52,34 @@ object TypedMacro {
     def tuple(elements: List[TypeRepr]): TypeRepr =
       elements.foldRight(TypeRepr.of[EmptyTuple])((element, rest) => TypeRepr.of[*:].appliedTo(List(element, rest)))
 
-    /** The type a leaf is read as, and its decoder: the one the API was given for a binding, or circe's own. */
+    /** A union of string literals, such as `"DOG" | "CAT"`, and a decoder that accepts only those. */
+    def oneOf(values: List[String], what: String): (TypeRepr, Expr[Decoder[?]]) = {
+      val tpe      = values.map(value => literal(value)).reduceLeft[TypeRepr](OrType(_, _))
+      val expected = Expr(values)
+      val decoder  = '{
+        Decoder.decodeString.emap { value =>
+          if ($expected.contains(value)) Right(value)
+          else Left(s"$value is not a value of ${${ Expr(what) }}: ${$expected.mkString(", ")}")
+        }
+      }
+      (tpe, decoder)
+    }
+
+    /** The type a leaf is read as, and its decoder: the one the API was given for a binding, or circe's own. An enum
+      * unbound is the union of its values as literals.
+      */
     def leaf(field: Check.Field, name: String): (TypeRepr, Expr[Decoder[?]]) =
       List(s"${field.owner}.${field.name}", name).find(bindings.contains) match {
         case Some(key) => (bindings(key), '{ $api.decoders(${ Expr(key) }) })
         case None      =>
-          name match {
-            case "Int"           => (TypeRepr.of[Int], '{ Decoder.decodeInt })
-            case "Float"         => (TypeRepr.of[Double], '{ Decoder.decodeDouble })
-            case "Boolean"       => (TypeRepr.of[Boolean], '{ Decoder.decodeBoolean })
-            case "String" | "ID" => (TypeRepr.of[String], '{ Decoder.decodeString })
-            case _               => (TypeRepr.of[Json], '{ Decoder.decodeJson })
+          (name, schema.types.get(name)) match {
+            case ("Int", _)                                                    => (TypeRepr.of[Int], '{ Decoder.decodeInt })
+            case ("Float", _)                                                  => (TypeRepr.of[Double], '{ Decoder.decodeDouble })
+            case ("Boolean", _)                                                => (TypeRepr.of[Boolean], '{ Decoder.decodeBoolean })
+            case ("String" | "ID", _)                                          => (TypeRepr.of[String], '{ Decoder.decodeString })
+            case (_, Some(definition)) if definition.kind == TypeKind.EnumType =>
+              oneOf(definition.enumValues.map(_.name), s"enum $name")
+            case _                                                             => (TypeRepr.of[Json], '{ Decoder.decodeJson })
           }
       }
 

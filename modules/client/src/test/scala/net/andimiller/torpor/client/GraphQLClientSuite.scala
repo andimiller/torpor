@@ -128,6 +128,18 @@ final class GraphQLClientSuite extends munit.CatsEffectSuite {
     }
   }
 
+  test("a typed operation reads an enum as a union of its values") {
+    val pets = petshop.operation("{ pets { species } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(pets())
+    } yield {
+      val species: List["DOG" | "CAT"] = data.pets.map(_.species)
+      assertEquals(species, List("DOG", "DOG", "DOG"))
+    }
+  }
+
   test("a typed operation with no variables is called with none") {
     val everyPet = petshop.operation("{ pets { name } }")
 

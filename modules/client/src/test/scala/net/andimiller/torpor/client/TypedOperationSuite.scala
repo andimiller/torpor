@@ -1,6 +1,19 @@
 package net.andimiller.torpor.client
 
-import io.circe.Json
+import io.circe.{Encoder, Json}
+
+/** Value classes, written as the value they wrap. */
+final case class Count(value: Int) extends AnyVal
+
+object Count {
+  given Encoder[Count] = Encoder.encodeInt.contramap(_.value)
+}
+
+final case class Label(value: String) extends AnyVal
+
+object Label {
+  given Encoder[Label] = Encoder.encodeString.contramap(_.value)
+}
 
 /** What compiles and what does not when an operation's types are written by the macro. */
 final class TypedOperationSuite extends munit.FunSuite {
@@ -55,6 +68,38 @@ final class TypedOperationSuite extends munit.FunSuite {
     val pets = petshop.operation("query P($first: Int) { pets(first: $first) { name } }")
 
     assertEquals(pets().variables.toMap, Map.empty)
+  }
+
+  test("an enum variable takes a literal of its values") {
+    val pets = petshop.operation("query P($species: Species) { pets(species: $species) { name } }")
+
+    assertEquals(pets(species = "DOG").variables.toMap.get("species"), Some(Json.fromString("DOG")))
+  }
+
+  test("an enum variable given a literal that is not one of its values does not compile") {
+    val pets   = petshop.operation("query P($species: Species) { pets(species: $species) { name } }")
+    val errors = compileErrors("""pets(species = "BIRD")""")
+
+    assert(
+      errors.contains("$species is the enum Species in the schema, but \"BIRD\" is not one of its values: DOG, CAT"),
+      errors
+    )
+  }
+
+  test("a value class is written as the value it wraps") {
+    val pets = petshop.operation("query P($first: Int) { pets(first: $first) { name } }")
+
+    assertEquals(pets(first = Count(2)).variables.toMap.get("first"), Some(Json.fromInt(2)))
+  }
+
+  test("a value class that wraps a value of the wrong type for a variable does not compile") {
+    val pets   = petshop.operation("query P($first: Int) { pets(first: $first) { name } }")
+    val errors = compileErrors("""pets(first = Label("two"))""")
+
+    assert(
+      errors.contains("$first is a Int in the schema, so it is written as BigInt or Int or Long, not String"),
+      errors
+    )
   }
 
   test("a field that cannot be null is read as its type") {
