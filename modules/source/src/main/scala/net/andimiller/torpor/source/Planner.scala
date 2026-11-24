@@ -401,13 +401,18 @@ object Planner {
           }
       }
 
+    /** A variable declared with a nullable type may be given no value: the spec reads it as absent, not as an error. */
+    private def optional(variable: String): Boolean =
+      operation.variables.find(_.name == variable).exists(!_.tpe.isNonNull)
+
     /** Variables are resolved here, once, so the plan only ever holds literals. */
     private def substitute(value: Value, at: Origin): Value =
       value match {
         case Value.VariableValue(name) =>
           variables.get(name).orElse(operation.variables.find(_.name == name).flatMap(_.default)) match {
-            case Some(resolved) => resolved
-            case None           =>
+            case Some(resolved)         => resolved
+            case None if optional(name) => Value.NullValue
+            case None                   =>
               error(PlanErrorKind.MissingVariable, s"variable '$$$name' has no value", at)
               Value.NullValue
           }
@@ -436,8 +441,10 @@ object Planner {
                   .get(name)
                   .orElse(operation.variables.find(_.name == name).flatMap(_.default))
                   .orElse(spec.default) match {
-                  case Some(resolved) => Some(resolved)
-                  case None           =>
+                  case Some(resolved)         => Some(resolved)
+                  // the argument is left out, as if the query had not written it
+                  case None if optional(name) => None
+                  case None                   =>
                     error(PlanErrorKind.MissingVariable, s"variable '$$$name' has no value", argument.origin)
                     None
                 }
@@ -466,18 +473,22 @@ object Planner {
       * decoder.
       */
     private def coerce(value: Value, tpe: TypeRef, at: Origin, path: String): Option[Value] =
+      value match {
+        // null fits every nullable type, which is also how an input object's omitted fields arrive
+        case Value.NullValue if tpe.isNonNull =>
+          error(PlanErrorKind.InvalidValue, s"$path is non-null, but null was given", at)
+          None
+        case Value.NullValue                  => Some(Value.NullValue)
+        case present                          => coercePresent(present, tpe, at, path)
+      }
+
+    /** Coerces a value other than null, so only its type decides what it may be. */
+    private def coercePresent(value: Value, tpe: TypeRef, at: Origin, path: String): Option[Value] =
       tpe match {
-        case TypeRef.NonNull(inner) =>
-          value match {
-            case Value.NullValue =>
-              error(PlanErrorKind.InvalidValue, s"$path is non-null, but null was given", at)
-              None
-            case other           => coerce(other, inner, at, path)
-          }
+        case TypeRef.NonNull(inner) => coercePresent(value, inner, at, path)
 
         case TypeRef.ListOf(element) =>
           value match {
-            case Value.NullValue     => Some(Value.NullValue)
             case Value.ListValue(vs) =>
               val coerced = vs.map(v => coerce(v, element, at, path).getOrElse(Value.NullValue))
               Some(Value.ListValue(coerced))
