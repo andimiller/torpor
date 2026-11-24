@@ -124,6 +124,19 @@ lazy val http = (project in file("modules/http"))
     )
   )
 
+// Typed operations for the calling side: a query is validated against the SDL when the code compiles, and its response
+// type is written from it. The macro and the code that calls it share a module, so tests live here.
+lazy val client = (project in file("modules/client"))
+  .dependsOn(core, schema)
+  .settings(commonSettings)
+  .settings(
+    name := "torpor-client",
+    libraryDependencies ++= Seq(
+      "io.circe"      %% "circe-core" % circeVersion,
+      "org.scalameta" %% "munit"      % munitVersion % Test
+    )
+  )
+
 lazy val conformance = (project in file("modules/conformance"))
   .dependsOn(schema)
   .settings(commonSettings)
@@ -207,6 +220,7 @@ lazy val root = (project in file("."))
     explain,
     relay,
     http,
+    client,
     conformance,
     testkit,
     examplesSharedEsi,
