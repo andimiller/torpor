@@ -70,6 +70,16 @@ final class TypedOperationSuite extends munit.FunSuite {
     assertEquals(pets().variables.toMap, Map.empty)
   }
 
+  test("a variable given as None is left out") {
+    val pets = petshop.operation("query P($first: Int) { pets(first: $first) { name } }")
+
+    assertEquals(pets(first = None).variables.toMap, Map.empty)
+  }
+
+  test("a list variable given as Nil is sent as an empty list") {
+    assertEquals(shelves(names = Nil).variables.toMap, Map("names" -> Json.arr()))
+  }
+
   test("a union has a view per member when the document selects __typename") {
     val home =
       petshop.operation("{ home(pet: \"1\") { __typename ... on Owner { name } ... on Shelter { capacity } } }")
@@ -113,6 +123,51 @@ final class TypedOperationSuite extends munit.FunSuite {
     assert(
       errors.contains("$first is a Int in the schema, so it is written as BigInt or Int or Long, not String"),
       errors
+    )
+  }
+
+  test("a variable given as null is sent as null") {
+    val request = shelves(names = List("fiction"), first = null)
+
+    assertEquals(request.variables.toMap.get("first"), Some(Json.Null))
+  }
+
+  test("an input object's field given as null is sent as null") {
+    val request = shelves(names = List("fiction"), filter = input(genre = "FICTION", minItems = null))
+
+    assertEquals(
+      request.variables.toMap.get("filter"),
+      Some(Json.obj("genre" -> Json.fromString("FICTION"), "minItems" -> Json.Null))
+    )
+  }
+
+  test("null for a variable that must be given a value does not compile") {
+    val errors = compileErrors("""shelves(names = null)""")
+
+    assert(errors.contains("$names must be given a value, so it cannot be null"), errors)
+  }
+
+  test("an input object is written with input(…)") {
+    val request = shelves(names = List("fiction"), filter = input(genre = "FICTION"))
+
+    assertEquals(request.variables.toMap.get("filter"), Some(Json.obj("genre" -> Json.fromString("FICTION"))))
+  }
+
+  test("an input object's field given as None is left out") {
+    val request = shelves(names = List("fiction"), filter = input(genre = "FICTION", minItems = Option.empty[Int]))
+
+    assertEquals(request.variables.toMap.get("filter"), Some(Json.obj("genre" -> Json.fromString("FICTION"))))
+  }
+
+  test("an input object may hold a list of input objects") {
+    val request = shelves(
+      names = List("fiction"),
+      filter = input(genre = "FICTION", or = List(input(genre = "SCIENCE"), input(genre = "FICTION", minItems = 3)))
+    )
+
+    assertEquals(
+      request.variables.toMap.get("filter").map(_.noSpaces),
+      Some("""{"genre":"FICTION","or":[{"genre":"SCIENCE"},{"genre":"FICTION","minItems":3}]}""")
     )
   }
 
@@ -177,6 +232,27 @@ final class TypedOperationSuite extends munit.FunSuite {
 
     assert(
       errors.contains("$first is a Int in the schema, so it is written as BigInt or Int or Long, not String"),
+      errors
+    )
+  }
+
+  test("an input object with a field its type does not have does not compile") {
+    val errors = compileErrors("""shelves(names = List("a"), filter = input(genre = "FICTION", colour = "red"))""")
+
+    assert(errors.contains("$filter has a field 'colour', which the input type ShelfFilter does not have"), errors)
+  }
+
+  test("an input object without a field its type requires does not compile") {
+    val errors = compileErrors("""shelves(names = List("a"), filter = input(minItems = 3))""")
+
+    assert(errors.contains("$filter.genre must be given a value"), errors)
+  }
+
+  test("a plain value where an input object is wanted does not compile") {
+    val errors = compileErrors("""shelves(names = List("a"), filter = "FICTION")""")
+
+    assert(
+      errors.contains("$filter is the input type ShelfFilter in the schema, so it is written with input(…)"),
       errors
     )
   }

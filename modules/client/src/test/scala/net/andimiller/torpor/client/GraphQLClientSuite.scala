@@ -255,5 +255,4 @@ final class GraphQLClientSuite extends munit.CatsEffectSuite {
       assertEquals(ages, List(Some(3L), None, Some(7L)))
     }
   }
-
 }

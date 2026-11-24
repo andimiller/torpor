@@ -22,8 +22,13 @@ enum Shape {
   /** Anything else: a primitive, or a type whose own codec decides what it writes, such as an id. */
   case Leaf(name: String)
 
-  /** A type the document can say nothing about, so it fits any leaf: an opaque type, whose own codec decides. */
+  /** A type the document can say nothing about, so it fits any leaf: an opaque type, whose own codec decides, or
+    * `Nothing`, the type of what `None` holds and `Nil` contains.
+    */
   case Trusted(name: String)
+
+  /** The literal `null`: a value sent as null, as opposed to a `None`, which is left out. */
+  case Null
 
   /** One of these string literals: a literal such as `"DOG"`, or a union of them such as `"DOG" | "CAT"`, which is what
     * an enum is written as.
@@ -31,6 +36,7 @@ enum Shape {
   case Literals(values: List[String])
 
   def render: String = this match {
+    case Null             => "null"
     case Literals(values) => values.map(value => s"\"$value\"").mkString(" | ")
     case Optional(of)     => s"Option[${of.render}]"
     case Many(of)         => s"List[${of.render}]"

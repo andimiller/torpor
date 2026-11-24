@@ -25,7 +25,8 @@ final class Request[D](
   * client.run(pets(first = Some(2))).map(_.pets.map(_.name))
   * }}}
   * `pets(first = …)` compiles only if `first` is a variable the document declares and its value fits the variable's
-  * type. A variable that must be given a value cannot be left out.
+  * type. A variable that must be given a value cannot be left out. One given as `None` is left out, and one given as
+  * `null` is sent as null, which a nullable input with a default tells apart.
   */
 final class TypedOperation[Sdl <: String, Variables <: Tuple, D](
     val document: String,

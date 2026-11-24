@@ -5,7 +5,7 @@ import net.andimiller.torpor.schema.{Executable, TypeKind, TypeRef as GqlType}
 
 import scala.quoted.*
 
-/** The macros behind `Api.operation` and calling a typed operation. */
+/** The macros behind `Api.operation`, calling a typed operation, and `input(…)`. */
 object TypedMacro {
 
   /** Types an operation from the schema: a [[Record]] refined with the fields the document selects, a decoder for it,
@@ -229,6 +229,23 @@ object TypedMacro {
     requestOf[Sdl, Variables, D](operation, Nil)
   }
 
+  /** `input(name = value, …)`: an [[InputObject]] whose type records each field and the type of its value. */
+  def input(fields: Expr[Seq[(String, Any)]])(using Quotes): Expr[InputObject[?]] = {
+    import quotes.reflect.*
+
+    val values = named(fields)
+    val spec   = values.foldRight(TypeRepr.of[EmptyTuple]) { case ((name, tpe, _), rest) =>
+      TypeRepr
+        .of[*:]
+        .appliedTo(List(TypeRepr.of[Tuple2].appliedTo(List(ConstantType(StringConstant(name)), tpe)), rest))
+    }
+    val pairs  = Expr.ofList(values.map { case (name, _, json) => '{ (${ Expr(name) }, $json) } })
+
+    TypeRepr.of[InputObject].appliedTo(spec).asType match {
+      case '[t] => '{ InputObject.of[Tuple]($pairs).asInstanceOf[t] }.asExprOf[InputObject[?]]
+    }
+  }
+
   /** Named arguments as `(name, the value's own type, the value encoded)`, where a `None` encodes to nothing. */
   private def named(using
       q: Quotes
@@ -251,7 +268,10 @@ object TypedMacro {
     }
   }
 
-  /** The value as JSON, with the `Encoder` in scope for its type, or nothing for an `Option` that is `None`. */
+  /** The value as JSON, with the `Encoder` in scope for its type, or nothing for an `Option` that is `None`. `null` is
+    * sent as null, which is not the same as nothing when the position has a default. `Nil` has no element to encode, so
+    * it is written as the empty list it is.
+    */
   private def encoded(using q: Quotes)(key: String, tpe: q.reflect.TypeRepr, value: Expr[Any]): Expr[Option[Json]] = {
     import q.reflect.*
 
@@ -260,7 +280,10 @@ object TypedMacro {
         report.errorAndAbort(s"'$key' is a ${TypeRepr.of[T].show}, which has no Encoder in scope")
       }
 
-    if (tpe <:< TypeRepr.of[Option[Any]])
+    if (tpe =:= TypeRepr.of[Null]) '{ Some(Json.Null) }
+    else if (tpe <:< TypeRepr.of[Option[Nothing]]) '{ None }
+    else if (tpe <:< TypeRepr.of[Iterable[Nothing]]) '{ Some(Json.arr()) }
+    else if (tpe <:< TypeRepr.of[Option[Any]])
       tpe.baseType(TypeRepr.of[Option[Any]].typeSymbol) match {
         case AppliedType(_, List(element)) =>
           element.asType match {

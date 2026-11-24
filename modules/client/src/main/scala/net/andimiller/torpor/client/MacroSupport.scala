@@ -78,14 +78,27 @@ private[client] object MacroSupport {
     }
   }
 
-  /** The shape of a type: see [[Shape]]. A value class is the shape of the one value it wraps, and an opaque type is
-    * taken on trust: its own codec decides.
+  /** The shape of a type: see [[Shape]]. An `InputObject` built with `input(…)` is a record of the fields it was given.
+    * A value class is the shape of the one value it wraps, and an opaque type is taken on trust: its own codec decides.
     */
   def shape(using q: Quotes)(tpe: q.reflect.TypeRepr): Shape = {
     import q.reflect.*
 
     val optionSymbol   = TypeRepr.of[Option[Any]].typeSymbol
     val iterableSymbol = TypeRepr.of[Iterable[Any]].typeSymbol
+    val inputSymbol    = TypeRepr.of[InputObject[EmptyTuple]].typeSymbol
+
+    def fields(spec: TypeRepr, within: Set[String]): List[(String, Shape)] = spec.dealias match {
+      case AppliedType(_, List(AppliedType(_, List(ConstantType(StringConstant(name)), value)), rest)) =>
+        (name -> of(value, within)) :: fields(rest, within)
+      case _                                                                                           => Nil
+    }
+
+    /** Whether a tuple type spells out every element, as the fields of one `input(…)` do. */
+    def known(spec: TypeRepr): Boolean = spec.dealias match {
+      case AppliedType(cons, List(_, rest)) if cons.typeSymbol == TypeRepr.of[*:].typeSymbol => known(rest)
+      case other                                                                             => other =:= TypeRepr.of[EmptyTuple]
+    }
 
     def of(tpe: TypeRepr, within: Set[String]): Shape = {
       val dealiased = tpe.dealias
@@ -93,6 +106,11 @@ private[client] object MacroSupport {
       dealiased match {
         case _ if literals(dealiased).isDefined                                                       =>
           Shape.Literals(literals(dealiased).get)
+        case _ if dealiased =:= TypeRepr.of[Null]                                                     =>
+          Shape.Null
+        // the element type of `Nil`, and what `None` holds: a value of it fits anywhere
+        case _ if dealiased =:= TypeRepr.of[Nothing]                                                  =>
+          Shape.Trusted("Nothing")
         // an opaque type cannot be seen through from here, so its own codec decides what it writes
         case _ if symbol.flags.is(Flags.Opaque)                                                       =>
           Shape.Trusted(symbol.name)
@@ -107,6 +125,11 @@ private[client] object MacroSupport {
             case AppliedType(_, List(of1)) => Shape.Optional(of(of1, within))
             case _                         => Shape.Optional(Shape.Leaf("Nothing"))
           }
+        // several input objects in one list lose their fields to a common type, and are taken on trust
+        case AppliedType(_, List(spec)) if symbol == inputSymbol && !known(spec)                      =>
+          Shape.Leaf("input(…)")
+        case AppliedType(_, List(spec)) if symbol == inputSymbol                                      =>
+          Shape.Record("input(…)", fields(spec, within))
         case AppliedType(_, List(of1)) if collections(symbol.name)                                    =>
           Shape.Many(of(of1, within))
         case _ if dealiased <:< TypeRepr.of[Iterable[Any]] && !(dealiased <:< TypeRepr.of[Map[?, ?]]) =>

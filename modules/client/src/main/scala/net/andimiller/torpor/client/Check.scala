@@ -109,13 +109,16 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
     }
 
   /** A value given for an input of type `tpe`, or the absence of one. An input that must be given a value is not an
-    * `Option`; a list is a collection; an input object is a record with no field the schema lacks and every field the
-    * schema requires.
+    * `Option`, nor `null`; a list is a collection; an input object is a record with no field the schema lacks and every
+    * field the schema requires.
     */
   def input(tpe: TypeRef, hasDefault: Boolean, value: Option[Shape], path: String): List[String] =
     (tpe, value) match {
       case (TypeRef.NonNull(_), None) if !hasDefault                    => List(s"$path must be given a value")
       case (_, None)                                                    => Nil
+      case (TypeRef.NonNull(_), Some(Shape.Null))                       =>
+        List(s"$path must be given a value, so it cannot be null")
+      case (_, Some(Shape.Null))                                        => Nil
       case (TypeRef.NonNull(_), Some(Shape.Optional(_))) if !hasDefault =>
         List(s"$path must be given a value, so it cannot be an Option")
       case (_, Some(Shape.Optional(inner)))                             => inputValue(tpe, inner, path)
@@ -145,7 +148,7 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
               case Shape.Leaf(scala) if !primitives(scala) => Nil
               case notRecord                               =>
                 List(
-                  s"$path is the input type $name in the schema, so it is written as a case class, not ${notRecord.render}"
+                  s"$path is the input type $name in the schema, so it is written with input(…), not ${notRecord.render}"
                 )
             }
           case _                                                               => leaf(name, other, path)
