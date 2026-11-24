@@ -20,11 +20,12 @@ final class Request[D](
   * `D` is the response: a [[Record]] with a member for each field the document selects. `Variables` lists the variables
   * the document declares, and `Sdl` is the schema, which is what lets a call be checked:
   * {{{
-  * val pets = petshop.operation("{ pets { name } }")
+  * val pets = petshop.operation("query Pets($first: Int) { pets(first: $first) { name } }")
   *
-  * client.run(pets()).map(_.pets.map(_.name))
+  * client.run(pets(first = Some(2))).map(_.pets.map(_.name))
   * }}}
-  * `pets()` compiles only if the document declares no variable that must be given a value.
+  * `pets(first = …)` compiles only if `first` is a variable the document declares and its value fits the variable's
+  * type. A variable that must be given a value cannot be left out.
   */
 final class TypedOperation[Sdl <: String, Variables <: Tuple, D](
     val document: String,
@@ -34,6 +35,9 @@ final class TypedOperation[Sdl <: String, Variables <: Tuple, D](
 
   /** The type of the response, for a signature that needs to name it. */
   type Data = D
+
+  inline def applyDynamicNamed(inline method: String)(inline variables: (String, Any)*): Request[D] =
+    ${ TypedMacro.request[Sdl, Variables, D]('this, 'variables) }
 
   /** `operation()`, for an operation that needs no variables. */
   inline def applyDynamic(inline method: String)(inline variables: Any*): Request[D] =

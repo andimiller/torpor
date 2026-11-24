@@ -5,7 +5,7 @@ import net.andimiller.torpor.schema.{Schema, SdlFragment}
 
 import scala.quoted.*
 
-/** What the client's macros share: reading a string and a schema at compile time. */
+/** What the client's macros share: reading a string and a schema at compile time, and the shape of a Scala type. */
 private[client] object MacroSupport {
 
   /** A string the compiler can read now: a literal, a constant such as an `inline val`, or literals and constants put
@@ -64,4 +64,48 @@ private[client] object MacroSupport {
     constant(expr).getOrElse(
       quotes.reflect.report.errorAndAbort("the schema must be a constant string: a literal, or an inline val")
     )
+
+  // collections that are not an `Iterable`, by the name of their class
+  private val collections = Set("NonEmptyList", "NonEmptyVector", "NonEmptyChain", "NonEmptySeq", "Chain")
+
+  /** The shape of a type: see [[Shape]]. */
+  def shape(using q: Quotes)(tpe: q.reflect.TypeRepr): Shape = {
+    import q.reflect.*
+
+    val optionSymbol   = TypeRepr.of[Option[Any]].typeSymbol
+    val iterableSymbol = TypeRepr.of[Iterable[Any]].typeSymbol
+
+    def of(tpe: TypeRepr, within: Set[String]): Shape = {
+      val dealiased = tpe.dealias
+      val symbol    = dealiased.typeSymbol
+      dealiased match {
+        // `Some(1)` and `None` are options too
+        case _ if dealiased <:< TypeRepr.of[Option[Any]]                                              =>
+          dealiased.baseType(optionSymbol) match {
+            case AppliedType(_, List(of1)) => Shape.Optional(of(of1, within))
+            case _                         => Shape.Optional(Shape.Leaf("Nothing"))
+          }
+        case AppliedType(_, List(of1)) if collections(symbol.name)                                    =>
+          Shape.Many(of(of1, within))
+        case _ if dealiased <:< TypeRepr.of[Iterable[Any]] && !(dealiased <:< TypeRepr.of[Map[?, ?]]) =>
+          dealiased.baseType(iterableSymbol) match {
+            case AppliedType(_, List(of1)) => Shape.Many(of(of1, within))
+            case _                         => Shape.Leaf(symbol.name)
+          }
+        // a sealed trait, such as `Json`, is never an input object
+        case _ if symbol.isClassDef && symbol.flags.is(Flags.Sealed) && !symbol.flags.is(Flags.Case)  =>
+          Shape.Sealed(symbol.name, symbol.children.map(child => of(child.typeRef, within + symbol.fullName)))
+        // a recursive case class is checked once: beneath itself it is taken on trust
+        case _ if symbol.isClassDef && symbol.flags.is(Flags.Case) && !within(symbol.fullName)        =>
+          Shape.Record(
+            symbol.name,
+            symbol.caseFields.map(field => field.name -> of(dealiased.memberType(field), within + symbol.fullName))
+          )
+        case _                                                                                        =>
+          Shape.Leaf(symbol.name)
+      }
+    }
+
+    of(tpe, Set.empty)
+  }
 }

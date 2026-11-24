@@ -1,6 +1,6 @@
 package net.andimiller.torpor.client
 
-import io.circe.{Decoder, Json, JsonObject}
+import io.circe.{Decoder, Encoder, Json, JsonObject}
 import net.andimiller.torpor.schema.{Executable, TypeKind, TypeRef as GqlType}
 
 import scala.quoted.*
@@ -13,15 +13,32 @@ object TypedMacro {
     *
     * A GraphQL type becomes a Scala type the way the server's `schema` macro types arguments: nullable is `Option`, a
     * list is `List`, an object is a nested record. A field selected in a fragment only some types match, or behind
-    * `@skip` or `@include`, is an `Option` too. A leaf is read as the Scala type that holds it, as [[Api]] describes.
+    * `@skip` or `@include`, is an `Option` too. A leaf is read as the type the [[Api]] binds it to, looked up first for
+    * the field (`Pet.id`) and then for its type (`ID`).
     */
-  def typed[Sdl <: String: Type](document: Expr[String])(using Quotes): Expr[TypedOperation[?, ?, ?]] = {
+  def typed[Sdl <: String: Type, Bindings <: Tuple: Type](
+      api: Expr[Api[Sdl, Bindings]],
+      document: Expr[String]
+  )(using Quotes): Expr[TypedOperation[?, ?, ?]] = {
     import quotes.reflect.*
 
     val schema = MacroSupport.schema[Sdl]
     val query  = MacroSupport.document(document)
 
     def literal(value: String): TypeRepr = ConstantType(StringConstant(value))
+
+    val bindings: Map[String, TypeRepr] = {
+      def each(tpe: TypeRepr): List[(String, TypeRepr)] = tpe.dealias match {
+        case AppliedType(_, List(AppliedType(_, List(name, bound)), rest)) =>
+          name.dealias match {
+            case ConstantType(StringConstant(value)) => (value -> bound) :: each(rest)
+            case _                                   => each(rest)
+          }
+        case _                                                             => Nil
+      }
+      // a later `read` of the same name comes first in the type, and wins
+      each(TypeRepr.of[Bindings]).reverse.toMap
+    }
 
     val validated = Executable.validate(schema, query) match {
       case Left(errors) =>
@@ -35,14 +52,18 @@ object TypedMacro {
     def tuple(elements: List[TypeRepr]): TypeRepr =
       elements.foldRight(TypeRepr.of[EmptyTuple])((element, rest) => TypeRepr.of[*:].appliedTo(List(element, rest)))
 
-    /** The type a leaf is read as, and circe's decoder for it. */
-    def leaf(name: String): (TypeRepr, Expr[Decoder[?]]) =
-      name match {
-        case "Int"           => (TypeRepr.of[Int], '{ Decoder.decodeInt })
-        case "Float"         => (TypeRepr.of[Double], '{ Decoder.decodeDouble })
-        case "Boolean"       => (TypeRepr.of[Boolean], '{ Decoder.decodeBoolean })
-        case "String" | "ID" => (TypeRepr.of[String], '{ Decoder.decodeString })
-        case _               => (TypeRepr.of[Json], '{ Decoder.decodeJson })
+    /** The type a leaf is read as, and its decoder: the one the API was given for a binding, or circe's own. */
+    def leaf(field: Check.Field, name: String): (TypeRepr, Expr[Decoder[?]]) =
+      List(s"${field.owner}.${field.name}", name).find(bindings.contains) match {
+        case Some(key) => (bindings(key), '{ $api.decoders(${ Expr(key) }) })
+        case None      =>
+          name match {
+            case "Int"           => (TypeRepr.of[Int], '{ Decoder.decodeInt })
+            case "Float"         => (TypeRepr.of[Double], '{ Decoder.decodeDouble })
+            case "Boolean"       => (TypeRepr.of[Boolean], '{ Decoder.decodeBoolean })
+            case "String" | "ID" => (TypeRepr.of[String], '{ Decoder.decodeString })
+            case _               => (TypeRepr.of[Json], '{ Decoder.decodeJson })
+          }
       }
 
     /** An `Option` of a type, read with its decoder when the value is there. */
@@ -81,7 +102,7 @@ object TypedMacro {
           schema.types.get(name).map(_.kind) match {
             case Some(TypeKind.ObjectType | TypeKind.InterfaceType | TypeKind.UnionType) =>
               record(field.beneath, path)
-            case _                                                                       => leaf(name)
+            case _                                                                       => leaf(field, name)
           }
       }
 
@@ -114,6 +135,45 @@ object TypedMacro {
     }
   }
 
+  /** `operation(name = value, …)`: each value against the variable it is given for, then the request. */
+  def request[Sdl <: String: Type, Variables <: Tuple: Type, D: Type](
+      operation: Expr[TypedOperation[Sdl, Variables, D]],
+      supplied: Expr[Seq[(String, Any)]]
+  )(using Quotes): Expr[Request[D]] = {
+    requestOf[Sdl, Variables, D](operation, named(supplied))
+  }
+
+  private def requestOf[Sdl <: String: Type, Variables <: Tuple: Type, D: Type](using q: Quotes)(
+      operation: Expr[TypedOperation[Sdl, Variables, D]],
+      values: List[(String, q.reflect.TypeRepr, Expr[Option[Json]])]
+  ): Expr[Request[D]] = {
+    import q.reflect.*
+
+    val schema   = MacroSupport.schema[Sdl]
+    val check    = new Check(schema, net.andimiller.torpor.schema.ExecutableDocument(Nil, Nil))
+    val declared = declaredVariables[Variables]
+
+    val unknown  = values.map(_._1).filterNot(name => declared.exists(_._1 == name)).map { name =>
+      s"the operation declares no variable '$$$name'"
+    }
+    val problems = unknown ++ declared.flatMap { case (name, tpe, hasDefault) =>
+      check.input(tpe, hasDefault, values.find(_._1 == name).map(value => MacroSupport.shape(value._2)), s"$$$name")
+    }
+    if (problems.nonEmpty)
+      report.errorAndAbort(problems.mkString("the variables do not fit the operation:\n  ", "\n  ", ""))
+
+    val fields = Expr.ofList(values.map { case (name, _, json) => '{ (${ Expr(name) }, $json) } })
+    '{
+      new Request[D](
+        $operation.document,
+        $operation.name,
+        // a variable given as `None` has no value, which is what leaving it out of the call means
+        JsonObject.fromIterable($fields.collect { case (name, Some(json)) => name -> json }),
+        $operation.decoder
+      )
+    }
+  }
+
   /** `operation()`: allowed when no variable must be given a value. */
   def requestWithout[Sdl <: String: Type, Variables <: Tuple: Type, D: Type](
       operation: Expr[TypedOperation[Sdl, Variables, D]],
@@ -126,14 +186,61 @@ object TypedMacro {
         report.errorAndAbort("give an operation's variables by name: operation(name = value, …)")
       case _                                  => ()
     }
+    requestOf[Sdl, Variables, D](operation, Nil)
+  }
 
-    val problems = declaredVariables[Variables].collect {
-      case (name, tpe, hasDefault) if tpe.isNonNull && !hasDefault => s"$$$name must be given a value"
+  /** Named arguments as `(name, the value's own type, the value encoded)`, where a `None` encodes to nothing. */
+  private def named(using
+      q: Quotes
+  )(supplied: Expr[Seq[(String, Any)]]): List[(String, q.reflect.TypeRepr, Expr[Option[Json]])] = {
+    import q.reflect.*
+
+    val pairs = supplied match {
+      case Varargs(pairs) => pairs.toList
+      case _              => report.errorAndAbort("give each value by name: name = value")
     }
-    if (problems.nonEmpty)
-      report.errorAndAbort(problems.mkString("the variables do not fit the operation:\n  ", "\n  ", ""))
+    pairs.map {
+      case '{ ($name: String, $value: Any) } =>
+        val key = name.value.filter(_.nonEmpty).getOrElse(report.errorAndAbort("give each value by name: name = value"))
+        // the pair is typed `(String, Any)`, so the value's own type is read off its tree; a literal keeps its type,
+        // which is how `"DOG"` is checked against an enum
+        val tpe = unascribed(value.asTerm).tpe.widenTermRefByName
+        (key, tpe, encoded(key, tpe.widen, value))
+      case other                             =>
+        report.errorAndAbort(s"give each value by name: name = value (found ${other.show})")
+    }
+  }
 
-    '{ new Request[D]($operation.document, $operation.name, JsonObject.empty, $operation.decoder) }
+  /** The value as JSON, with the `Encoder` in scope for its type, or nothing for an `Option` that is `None`. */
+  private def encoded(using q: Quotes)(key: String, tpe: q.reflect.TypeRepr, value: Expr[Any]): Expr[Option[Json]] = {
+    import q.reflect.*
+
+    def encoder[T: Type]: Expr[Encoder[T]] =
+      Expr.summon[Encoder[T]].getOrElse {
+        report.errorAndAbort(s"'$key' is a ${TypeRepr.of[T].show}, which has no Encoder in scope")
+      }
+
+    if (tpe <:< TypeRepr.of[Option[Any]])
+      tpe.baseType(TypeRepr.of[Option[Any]].typeSymbol) match {
+        case AppliedType(_, List(element)) =>
+          element.asType match {
+            case '[t] => '{ ${ value.asExprOf[Option[t]] }.map(held => ${ encoder[t] }(held)) }
+          }
+        case _                             => report.errorAndAbort(s"'$key' is a ${tpe.show}, which is not an Option of anything")
+      }
+    else
+      tpe.asType match {
+        case '[t] => '{ Some(${ encoder[t] }(${ value.asExprOf[t] })) }
+      }
+  }
+
+  private def unascribed(using q: Quotes)(term: q.reflect.Term): q.reflect.Term = {
+    import q.reflect.*
+    term match {
+      case Inlined(_, Nil, inner) => unascribed(inner)
+      case Typed(inner, _)        => unascribed(inner)
+      case other                  => other
+    }
   }
 
   private def declaredVariables[V <: Tuple: Type](using Quotes): List[(String, GqlType, Boolean)] = {

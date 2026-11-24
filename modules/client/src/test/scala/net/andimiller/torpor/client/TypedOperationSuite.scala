@@ -39,6 +39,24 @@ final class TypedOperationSuite extends munit.FunSuite {
     assertEquals(shelves.name, Some("Shelves"))
   }
 
+  test("a variable is given by name") {
+    val pet = petshop.operation("query P($id: ID!) { pet(id: $id) { name } }")
+
+    assertEquals(pet(id = "1").variables.toMap, Map("id" -> Json.fromString("1")))
+  }
+
+  test("a variable with a default may be left out") {
+    val pets = petshop.operation("query P($first: Int! = 2) { pets(first: $first) { name } }")
+
+    assertEquals(pets().variables.toMap, Map.empty)
+  }
+
+  test("a nullable variable may be left out") {
+    val pets = petshop.operation("query P($first: Int) { pets(first: $first) { name } }")
+
+    assertEquals(pets().variables.toMap, Map.empty)
+  }
+
   test("a field that cannot be null is read as its type") {
     val read: shelves.Data => List[String] = _.shelves.map(_.name)
   }
@@ -75,6 +93,33 @@ final class TypedOperationSuite extends munit.FunSuite {
     val errors = compileErrors("""(data: shelves.Data) => data.shelves.map(_.tags)""")
 
     assert(errors.contains("tags"), errors)
+  }
+
+  test("leaving out a variable that must be given a value does not compile") {
+    val errors = compileErrors("""shelves(first = 2)""")
+
+    assert(errors.contains("$names must be given a value"), errors)
+  }
+
+  test("a variable the operation does not declare does not compile") {
+    val errors = compileErrors("""shelves(names = List("a"), limit = 2)""")
+
+    assert(errors.contains("the operation declares no variable '$limit'"), errors)
+  }
+
+  test("a single value for a list variable does not compile") {
+    val errors = compileErrors("""shelves(names = "fiction")""")
+
+    assert(errors.contains("$names is a list in the schema, so it is written as a collection, not"), errors)
+  }
+
+  test("a value of the wrong type for a variable does not compile") {
+    val errors = compileErrors("""shelves(names = List("a"), first = "two")""")
+
+    assert(
+      errors.contains("$first is a Int in the schema, so it is written as BigInt or Int or Long, not String"),
+      errors
+    )
   }
 
   test("a literal argument of the wrong type does not compile") {
@@ -141,4 +186,19 @@ final class TypedOperationSuite extends munit.FunSuite {
     assert(errors.contains("nickname"), errors)
   }
 
+  test("a binding needs a Decoder for the type it names") {
+    val errors = compileErrors(
+      """final class Published
+         library.read["Date", Published]"""
+    )
+
+    assert(errors.contains("Decoder"), errors)
+  }
+
+  test("a later binding of the same name replaces an earlier one") {
+    val rebound =
+      library.read["Date", String].read["Date", java.time.LocalDate].operation("{ shelves(names: []) { published } }")
+
+    val read: rebound.Data => List[Option[java.time.LocalDate]] = _.shelves.map(_.published)
+  }
 }

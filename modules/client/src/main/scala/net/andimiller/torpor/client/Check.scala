@@ -13,7 +13,8 @@ import net.andimiller.torpor.schema.{
   TypeRef
 }
 
-/** What an operation selects, as the macro that writes its response type reads it.
+/** What an operation selects, as the macro that writes its response type reads it, and whether a value given for an
+  * input fits the input's type.
   *
   * A field selected inside a fragment that only some types match, or behind `@skip` or `@include`, is conditional: the
   * response may not carry it.
@@ -69,11 +70,75 @@ object Check {
     else if (text.startsWith("[")) TypeRef.ListOf(parse(text.drop(1).dropRight(1)))
     else TypeRef.Named(text)
 
+  /** Scala types that can never be a whole input object. */
+  private val primitives: Set[String] =
+    Set("String", "Boolean", "Int", "Long", "Double", "Float", "BigInt", "BigDecimal", "Unit")
+
+  private val leaves: Map[String, Set[String]] = Map(
+    "String"  -> Set("String"),
+    "Boolean" -> Set("Boolean"),
+    "Int"     -> Set("Int", "Long", "BigInt"),
+    "Float"   -> Set("Double", "Float", "BigDecimal")
+  )
+
 }
 
 final private[client] class Check(schema: Schema, document: ExecutableDocument) {
 
   import Check.*
+
+  private def leaf(name: String, shape: Shape, path: String): List[String] =
+    shape match {
+      case Shape.Leaf(scala) =>
+        leaves.get(name).filterNot(_.contains(scala)).toList.map { allowed =>
+          s"$path is a $name in the schema, so it is written as ${allowed.toList.sorted.mkString(" or ")}, not $scala"
+        }
+      case other             =>
+        List(s"$path is the scalar or enum $name in the schema, so it cannot be written as ${other.render}")
+    }
+
+  /** A value given for an input of type `tpe`, or the absence of one. An input that must be given a value is not an
+    * `Option`; a list is a collection; an input object is a record with no field the schema lacks and every field the
+    * schema requires.
+    */
+  def input(tpe: TypeRef, hasDefault: Boolean, value: Option[Shape], path: String): List[String] =
+    (tpe, value) match {
+      case (TypeRef.NonNull(_), None) if !hasDefault                    => List(s"$path must be given a value")
+      case (_, None)                                                    => Nil
+      case (TypeRef.NonNull(_), Some(Shape.Optional(_))) if !hasDefault =>
+        List(s"$path must be given a value, so it cannot be an Option")
+      case (_, Some(Shape.Optional(inner)))                             => inputValue(tpe, inner, path)
+      case (_, Some(shape))                                             => inputValue(tpe, shape, path)
+    }
+
+  private def inputValue(tpe: TypeRef, shape: Shape, path: String): List[String] =
+    (tpe, shape) match {
+      case (TypeRef.NonNull(of), other)              => inputValue(of, other, path)
+      case (TypeRef.ListOf(of), Shape.Many(element)) => input(of, hasDefault = false, Some(element), s"$path[]")
+      case (TypeRef.ListOf(_), other)                =>
+        List(s"$path is a list in the schema, so it is written as a collection, not ${other.render}")
+      case (TypeRef.Named(name), other)              =>
+        schema.types.get(name) match {
+          case Some(definition) if definition.kind == TypeKind.InputObjectType =>
+            other match {
+              case Shape.Record(_, fields)                 =>
+                val declared = definition.fields.map(_.name).toSet
+                val unknown  = fields.map(_._1).filterNot(declared).map { field =>
+                  s"$path has a field '$field', which the input type $name does not have"
+                }
+                unknown ++ definition.fields.flatMap { field =>
+                  input(field.tpe, field.defaultValue.isDefined, fields.toMap.get(field.name), s"$path.${field.name}")
+                }
+              // a type of the caller's own stands for the whole input object: its encoder decides what is sent
+              case Shape.Leaf(scala) if !primitives(scala) => Nil
+              case notRecord                               =>
+                List(
+                  s"$path is the input type $name in the schema, so it is written as a case class, not ${notRecord.render}"
+                )
+            }
+          case _                                                               => leaf(name, other, path)
+        }
+    }
 
   /** The type an operation's response starts from, with the operation's selections on it. */
   def root(operation: OperationDefinition): Option[Selections] = {
