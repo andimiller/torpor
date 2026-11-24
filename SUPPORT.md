@@ -41,21 +41,19 @@ Implemented (spec section in brackets):
 - [5.1.1] executable definitions only in a query document
 - [5.2.1.1] operation name uniqueness; [5.2.2.1] lone anonymous operation
 - [5.3.1] field selections (field exists on the parent type, `__typename`, unions)
-- [5.3.2] field selection merging: same response key must be the same field with the same arguments
+- [5.3.2] field selection merging, as `FieldsInSetCanMerge`: across fragments, with the same response shape, and the same field and arguments where the parents may overlap
 - [5.3.3] leaf field selections (no selection set on leaves, required on composites)
 - [5.4.1] argument names; [5.4.2] argument uniqueness; [5.4.2.1] required arguments (honours defaults)
 - [5.5.1.1] fragment name uniqueness; [5.5.1.2] fragment type existence, spread target defined
-- [5.5.2.1] fragment spread cycles
+- [5.5.2.1] fragment spread cycles; [5.5.2.3] fragment spread is possible
+- [5.6.1] values of correct type for literals and variable defaults (built-in scalars, enums, lists, null); [5.6.2] input object field names; [5.6.3] input object field uniqueness; [5.6.4] input object required fields
 - [5.7.1] directive names; [5.7.2] directive locations; [5.7.3] uniqueness per location
-- [5.8.1] variable uniqueness; [5.8.2] variables are input types; [5.8.3] all variable uses defined (through fragments)
+- [5.8.1] variable uniqueness; [5.8.2] variables are input types; [5.8.3] all variable uses defined (through fragments); [5.8.5] all variable usages are allowed, through fragments, lists, input objects and directives
 - operation type exists for the operation kind
 
 Not implemented, and therefore rejected or deferred (see "Scoping discipline" in the notes):
 
-- [5.6.1] the full spec coercion table: built-in scalars, enums and input objects are coerced in the planner; a custom scalar's values pass through to its decoder
-- [5.8.5] variable usages allowed: a variable's declared type is not compared with the argument's type
-- [5.3.2] cross-fragment merging and return-type compatibility (the planner rejects conflicting response keys where type conditions overlap)
-- [5.5.1.1] possible fragment spreads are checked by the planner at execution time, not by validation
+- [5.6.1] a custom scalar's literals pass through to its decoder, which reports a bad one as `INVALID_INPUT` at execution
 - [5.5.1.3] unused fragments, [5.8.4] unused variables (harmless; not rejected)
 - introspection (`__schema`, `__type` in a normal query), `@defer`, `@stream`, subscriptions: rejected with `unsupported`
 - custom directives: rejected at SDL merge time

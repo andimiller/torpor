@@ -19,4 +19,11 @@ enum TypeRef {
     case NonNull(_) => true
     case _          => false
   }
+
+  /** As SDL writes it, such as `[ID!]!`. */
+  def render: String = this match {
+    case Named(name) => name
+    case ListOf(of)  => s"[${of.render}]"
+    case NonNull(of) => s"${of.render}!"
+  }
 }

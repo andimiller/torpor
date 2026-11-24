@@ -12,7 +12,7 @@ import net.andimiller.torpor.core.{
   TypeRef,
   Value
 }
-import net.andimiller.torpor.schema.{SdlFragment, Schema, Executable}
+import net.andimiller.torpor.schema.{Executable, Schema, SdlFragment, ValidationRule}
 
 class PlannerSuite extends munit.FunSuite {
 
@@ -284,17 +284,24 @@ class PlannerSuite extends munit.FunSuite {
     )
   }
 
-  test("fragment expansion can create a merge conflict the validator cannot see") {
-    val problems = planErrors("""
-      |{
-      |  pets(first: 3) { name }
-      |  ...more
-      |}
-      |fragment more on Query { pets(first: 4) { name } }
-      |""".stripMargin)
+  test("a merge conflict through a fragment is found by the validator, so the planner never sees it") {
+    val errors = Executable
+      .validate(
+        schema,
+        """
+          |{
+          |  pets(first: 3) { name }
+          |  ...more
+          |}
+          |fragment more on Query { pets(first: 4) { name } }
+          |""".stripMargin
+      )
+      .swap
+      .map(_.toChain.toList)
+      .getOrElse(Nil)
 
-    assertEquals(problems.map(_.kind).distinct, List(PlanErrorKind.MergeConflict))
-    assert(problems.head.render.contains("different arguments"))
+    assertEquals(errors.map(_.rule).distinct, List(ValidationRule.FieldSelectionMerging))
+    assert(errors.head.render.contains("different arguments"))
   }
 
   test("a leaf root field still needs a node") {

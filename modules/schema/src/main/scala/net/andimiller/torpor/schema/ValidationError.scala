@@ -19,12 +19,18 @@ enum ValidationRule(val label: String) {
   case ArgumentNames extends ValidationRule("5.4.1 Argument Names")
   case ArgumentUniqueness extends ValidationRule("5.4.2 Argument Uniqueness")
   case RequiredArguments extends ValidationRule("5.4.2.1 Required Arguments")
+  case PossibleFragmentSpreads extends ValidationRule("5.5.2.3 Fragment Spread Is Possible")
+  case ValuesOfCorrectType extends ValidationRule("5.6.1 Values of Correct Type")
+  case InputObjectFieldNames extends ValidationRule("5.6.2 Input Object Field Names")
+  case InputObjectFieldUniqueness extends ValidationRule("5.6.3 Input Object Field Uniqueness")
+  case InputObjectRequiredFields extends ValidationRule("5.6.4 Input Object Required Fields")
   case DirectiveNames extends ValidationRule("5.7.1 Directives Are Defined")
   case DirectiveLocations extends ValidationRule("5.7.2 Directives Are In Valid Locations")
   case UniqueDirectivesPerLocation extends ValidationRule("5.7.3 Directives Are Unique Per Location")
   case VariableUniqueness extends ValidationRule("5.8.1 Variable Uniqueness")
   case VariablesAreInputTypes extends ValidationRule("5.8.2 Variables Are Input Types")
   case UndefinedVariables extends ValidationRule("5.8.3 All Variable Uses Defined")
+  case VariableUsagesAllowed extends ValidationRule("5.8.5 All Variable Usages Are Allowed")
   case Unsupported extends ValidationRule("unsupported")
 }
 

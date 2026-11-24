@@ -177,7 +177,7 @@ class ValidationSuite extends munit.FunSuite {
     "not implemented yet"
   )
 
-  // 5.3.2 Field Selection Merging (partial: arguments and response keys, not cross-fragment)
+  // 5.3.2 Field Selection Merging
 
   invalid(
     "the same response key with different arguments",
@@ -194,6 +194,195 @@ class ValidationSuite extends munit.FunSuite {
   )
 
   valid("the same field twice with the same arguments", """{ search(term: "a") { name } search(term: "a") { name } }""")
+
+  invalid(
+    "different arguments through a fragment",
+    """{ search(term: "a") { name } ...more } fragment more on Query { search(term: "b") { name } }""",
+    FieldSelectionMerging,
+    "selected twice with different arguments"
+  )
+
+  invalid(
+    "one alias for two fields of different types across fragments",
+    "{ pet { ... on Dog { x: name } ... on Cat { x: meowVolume } } }",
+    FieldSelectionMerging,
+    "response key 'x' is 'String!' on 'Dog' and 'Int' on 'Cat'"
+  )
+
+  invalid(
+    "one alias for two fields on an interface and one of its implementers",
+    "{ pet { x: name ... on Dog { x: nickname } } }",
+    FieldSelectionMerging,
+    "response key 'x' is used for both 'name' and 'nickname' on 'Pet' and 'Dog'"
+  )
+
+  invalid(
+    "conflicting fields beneath a key selected twice",
+    """{ dog { owner { pets { name } } } dog { owner { pets { name: nickname } } } }""",
+    FieldSelectionMerging,
+    "response key 'name' is used for both 'name' and 'nickname' on 'Pet'"
+  )
+
+  valid(
+    "one alias for different fields of the same shape on distinct object types",
+    "{ pet { ... on Dog { volume: barkVolume } ... on Cat { volume: meowVolume } } }"
+  )
+
+  valid("the same field through a fragment and inline", "{ dog { name ...dogName } } fragment dogName on Dog { name }")
+
+  // 5.5.2.3 Fragment Spread Is Possible
+
+  invalid(
+    "an inline fragment on a type the parent can never be",
+    "{ dog { ... on Cat { meowVolume } } }",
+    PossibleFragmentSpreads,
+    "inline fragment on 'Cat' can never apply to 'Dog'"
+  )
+
+  invalid(
+    "a named fragment on a type the parent can never be",
+    "{ dog { ...catFields } } fragment catFields on Cat { meowVolume }",
+    PossibleFragmentSpreads,
+    "fragment 'catFields' on 'Cat' can never apply to 'Dog'"
+  )
+
+  valid("an object fragment on an interface it implements", "{ pet { ... on Dog { nickname } } }")
+  valid("an interface fragment on a union with a member that implements it", "{ catOrDog { ... on Pet { name } } }")
+  valid("an interface fragment on an object that implements it", "{ dog { ... on Pet { name } } }")
+
+  // 5.6.1 Values of Correct Type
+
+  invalid(
+    "a number for a String argument",
+    "{ search(term: 1) { name } }",
+    ValuesOfCorrectType,
+    "argument 'term' is a String, but got the number 1"
+  )
+
+  invalid(
+    "an enum value written as a string",
+    """{ dog { doesKnowCommand(dogCommand: "SIT") } }""",
+    ValuesOfCorrectType,
+    "an enum value is written without quotes"
+  )
+
+  invalid(
+    "an enum value the enum does not have",
+    "{ dog { doesKnowCommand(dogCommand: ROLL) } }",
+    ValuesOfCorrectType,
+    "ROLL is not one of its values: SIT, DOWN, HEEL"
+  )
+
+  invalid(
+    "null for a non-null argument",
+    "{ withDefault(x: null) }",
+    ValuesOfCorrectType,
+    "argument 'x' is null, but its type 'Int!' is non-null"
+  )
+
+  invalid(
+    "an Int that does not fit 32 bits",
+    "{ withDefault(x: 99999999999) }",
+    ValuesOfCorrectType,
+    "does not fit in 32 bits"
+  )
+
+  invalid(
+    "a default value of the wrong type",
+    "query ($x: Int = \"one\") { withDefault(x: $x) }",
+    ValuesOfCorrectType,
+    "the default of variable '$x' is an Int, but got the string \"one\""
+  )
+
+  valid("an Int for a Float, and a number for an ID", "{ pets(first: 2) { id } }", shop)
+  valid("a single value where a list is expected", """{ dog { owner { pets { name } } } }""")
+
+  // 5.6.2 to 5.6.4 Input Object Fields
+
+  invalid(
+    "an input object field the type does not have",
+    """mutation { addPet(input: { name: "a", colour: "red" }) { name } }""",
+    InputObjectFieldNames,
+    "argument 'input' has no field 'colour'"
+  )
+
+  invalid(
+    "an input object field given twice",
+    """mutation { addPet(input: { name: "a", name: "b" }) { name } }""",
+    InputObjectFieldUniqueness,
+    "has field 'name' 2 times"
+  )
+
+  invalid(
+    "an input object without a required field",
+    """mutation { addPet(input: { nickname: "a" }) { name } }""",
+    InputObjectRequiredFields,
+    "argument 'input' requires field 'name'"
+  )
+
+  invalid(
+    "an input object field of the wrong type",
+    """mutation { addPet(input: { name: "a", barkVolume: "loud" }) { name } }""",
+    ValuesOfCorrectType,
+    "argument 'input'.barkVolume is an Int, but got the string \"loud\""
+  )
+
+  valid("an input object with its required field", """mutation { addPet(input: { name: "a" }) { name } }""")
+
+  // 5.8.5 All Variable Usages Are Allowed
+
+  invalid(
+    "a variable of the wrong type",
+    "query ($t: Int!) { search(term: $t) { name } }",
+    VariableUsagesAllowed,
+    "variable '$t' is a 'Int!', which cannot be used where a 'String!' is expected"
+  )
+
+  invalid(
+    "a nullable variable in a non-null position",
+    "query ($t: String) { search(term: $t) { name } }",
+    VariableUsagesAllowed,
+    "variable '$t' is a 'String', which cannot be used where a 'String!' is expected"
+  )
+
+  invalid(
+    "a list variable in a single position",
+    "query ($t: [String!]!) { search(term: $t) { name } }",
+    VariableUsagesAllowed,
+    "cannot be used where a 'String!' is expected"
+  )
+
+  invalid(
+    "a variable of the wrong type in a directive",
+    "query ($b: String!) { version @include(if: $b) }",
+    VariableUsagesAllowed,
+    "cannot be used where a 'Boolean!' is expected"
+  )
+
+  invalid(
+    "a variable of the wrong type inside an input object",
+    "mutation ($n: Int) { addPet(input: { name: $n }) { name } }",
+    VariableUsagesAllowed,
+    "variable '$n' is a 'Int', which cannot be used where a 'String!' is expected"
+  )
+
+  invalid(
+    "a variable of the wrong type through a fragment",
+    "query ($t: Int!) { ...found } fragment found on Query { search(term: $t) { name } }",
+    VariableUsagesAllowed,
+    "cannot be used where a 'String!' is expected"
+  )
+
+  valid(
+    "a nullable variable with a default in a non-null position",
+    """query ($t: String = "a") { search(term: $t) { name } }"""
+  )
+  valid("a nullable variable in a non-null position that has a default", "query ($x: Int) { withDefault(x: $x) }")
+  valid(
+    "a non-null variable in a nullable position",
+    "query ($c: DogCommand!) { dog { doesKnowCommand(dogCommand: $c) } }"
+  )
+  valid("a variable in a directive", "query ($b: Boolean!) { version @include(if: $b) }")
 
   // 5.3.3 Leaf Field Selections
 
