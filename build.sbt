@@ -127,13 +127,16 @@ lazy val http = (project in file("modules/http"))
 // Typed operations for the calling side: a query is validated against the SDL when the code compiles, and its response
 // type is written from it. The macro and the code that calls it share a module, so tests live here.
 lazy val client = (project in file("modules/client"))
-  .dependsOn(core, schema)
+  .dependsOn(core, schema, source % Test, http % Test, macros % Test)
   .settings(commonSettings)
   .settings(
     name := "torpor-client",
     libraryDependencies ++= Seq(
-      "io.circe"      %% "circe-core" % circeVersion,
-      "org.scalameta" %% "munit"      % munitVersion % Test
+      "org.http4s"    %% "http4s-client"     % http4sVersion,
+      "org.http4s"    %% "http4s-circe"      % http4sVersion,
+      "io.circe"      %% "circe-core"        % circeVersion,
+      "org.typelevel" %% "munit-cats-effect" % "2.2.1"      % Test,
+      "org.scalameta" %% "munit"             % munitVersion % Test
     )
   )
 
