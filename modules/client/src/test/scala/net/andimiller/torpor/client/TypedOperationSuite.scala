@@ -98,13 +98,41 @@ final class TypedOperationSuite extends munit.FunSuite {
     assert(errors.contains("inline fragment on 'Shelter' can never apply to 'Pet'"), errors)
   }
 
+  test("an operation may interpolate a constant selection that several operations share") {
+    inline val petFields = "id name age owner { name }"
+
+    val pets = petshop.operation(
+      s"""
+        query All {
+          pets { $petFields }
+        }
+      """
+    )
+
+    assert(pets.document.contains("pets { id name age owner { name } }"), pets.document)
+  }
+
+  test("an operation may be joined from constant strings with +") {
+    val pet = petshop.operation("query P($id: ID!) { pet(id: $id) { " + "name" + " } }")
+
+    assertEquals(pet.name, Some("P"))
+  }
+
+  test("an operation may be trimmed with stripMargin") {
+    val pets = petshop.operation("""{
+                                   |  pets { id name age owner { name } }
+                                   |}""".stripMargin)
+
+    assert(pets.document.startsWith("{\n  pets"), pets.document)
+  }
+
   test("an operation built from a value the compiler cannot read does not compile") {
     val errors = compileErrors(
       """val fields = List("id").mkString
          petshop.operation(s"{ pets { $fields } }")"""
     )
 
-    assert(errors.contains("the operation must be a string literal"), errors)
+    assert(errors.contains("the operation must be a constant string"), errors)
   }
 
   test("a document that is not valid against the schema does not compile") {
