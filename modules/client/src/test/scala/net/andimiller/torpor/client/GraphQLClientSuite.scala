@@ -149,6 +149,89 @@ final class GraphQLClientSuite extends munit.CatsEffectSuite {
     } yield assertEquals(data.pets.map(_.name), List("Rex", "Fido", "Bo"))
   }
 
+  test("a typed operation reads __typename as the names of a union's members") {
+    val home = petshop.operation("{ home(pet: \"1\") { __typename } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(home())
+    } yield {
+      val typename: Option["Owner" | "Shelter"] = data.home.map(_.__typename)
+      assertEquals(typename, Option[String]("Shelter"))
+    }
+  }
+
+  test("a typed operation reads a field that every member of a union selects as it is") {
+    val home = petshop.operation("{ home(pet: \"1\") { ... on Owner { name } ... on Shelter { name } } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(home())
+    } yield {
+      val name: Option[String] = data.home.map(_.name)
+      assertEquals(name, Some("Paws"))
+    }
+  }
+
+  test("a typed operation reads a field that only one member of a union selects as an Option") {
+    val home = petshop.operation("{ home(pet: \"1\") { ... on Owner { name } ... on Shelter { capacity } } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(home())
+    } yield {
+      val capacity: Option[Int] = data.home.flatMap(_.capacity)
+      assertEquals(capacity, Some(40))
+    }
+  }
+
+  test("a typed operation reads a union as the member the server answered with, and that member's fields as they are") {
+    val home =
+      petshop.operation("{ home(pet: \"1\") { __typename ... on Owner { name } ... on Shelter { capacity } } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(home())
+    } yield {
+      val capacity: Option[Int] = data.home.flatMap(_.asShelter).map(_.capacity)
+      assertEquals(capacity, Some(40))
+    }
+  }
+
+  test("a typed operation reads a union as no member that the server did not answer with") {
+    val home =
+      petshop.operation("{ home(pet: \"1\") { __typename ... on Owner { name } ... on Shelter { capacity } } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(home())
+    } yield assertEquals(data.home.flatMap(_.asOwner), None)
+  }
+
+  test("a typed operation reads a field behind @include when it is included") {
+    val pets = petshop.operation("query P($named: Boolean!) { pets { id name @include(if: $named) } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(pets(named = true))
+    } yield {
+      val names: List[Option[String]] = data.pets.map(_.name)
+      assertEquals(names, List(Some("Rex"), Some("Fido"), Some("Bo")))
+    }
+  }
+
+  test("a typed operation reads a field behind @include as None when it is not included") {
+    val pets = petshop.operation("query P($named: Boolean!) { pets { id name @include(if: $named) } }")
+
+    for {
+      graphql <- client
+      data    <- graphql.run(pets(named = false))
+    } yield {
+      val names: List[Option[String]] = data.pets.map(_.name)
+      assertEquals(names, List(None, None, None))
+    }
+  }
+
   test("a typed operation reads a field as the type the API binds for that field") {
     val pets = petshop.read["Pet.id", PetId].operation("{ pets { id } }")
 

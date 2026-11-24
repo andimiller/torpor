@@ -25,14 +25,27 @@ final class Record(private val values: Map[String, Any]) extends Selectable {
 object Record {
 
   /** Called by code the macro generates; not part of the API. A field the response leaves out is read with a failed
-    * cursor, which is what an `Option` decodes as `None`.
+    * cursor, which is what an `Option` decodes as `None`. A view is read from the object itself, as one of the types it
+    * can be: see [[member]].
     */
-  def decoder(fields: List[(String, Decoder[?])]): Decoder[Record] =
+  def decoder(fields: List[(String, Decoder[?])], views: List[(String, Decoder[?])] = Nil): Decoder[Record] =
     Decoder.instance { cursor =>
-      fields
-        .foldLeft[Decoder.Result[Map[String, Any]]](Right(Map.empty)) { case (decoded, (name, decoder)) =>
-          decoded.flatMap(values => decoder.tryDecode(cursor.downField(name)).map(value => values + (name -> value)))
+      val read = fields.map { case (name, decoder) => (name, decoder, cursor.downField(name)) } ++
+        views.map { case (name, decoder) => (name, decoder, cursor) }
+      read
+        .foldLeft[Decoder.Result[Map[String, Any]]](Right(Map.empty)) { case (decoded, (name, decoder, at)) =>
+          decoded.flatMap(values => decoder.tryDecode(at).map(value => values + (name -> value)))
         }
         .map(new Record(_))
+    }
+
+  /** Called by code the macro generates; not part of the API. The value as one type it can be, when the `__typename`
+    * under `key` says it is that type, read with that type's decoder.
+    */
+  def member(key: String, name: String, decoder: Decoder[?]): Decoder[Option[Any]] =
+    Decoder.instance { cursor =>
+      cursor.get[String](key).flatMap { typename =>
+        if (typename == name) decoder.tryDecode(cursor).map(Some(_)) else Right(None)
+      }
     }
 }

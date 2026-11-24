@@ -87,18 +87,41 @@ object TypedMacro {
     def optional(tpe: TypeRepr, decoder: Expr[Decoder[?]]): (TypeRepr, Expr[Decoder[?]]) =
       (TypeRepr.of[Option].appliedTo(tpe), '{ Decoder.decodeOption(using $decoder.asInstanceOf[Decoder[Any]]) })
 
-    /** A record of the fields selected on an object. */
+    /** A record of the fields selected on an object. `__typename` is the literal names of the types the object can be.
+      * A union or interface whose fragments select fields for some of its types, and that selects `__typename` to tell
+      * them apart, also gets one member per type, `asOwner`, `asShelter`: the record as that type, when it is one.
+      */
     def record(selections: Check.Selections, path: String): (TypeRepr, Expr[Decoder[?]]) = {
-      val selected = check.fields(selections)
-      val fields   = selected.map { field =>
-        val (tpe, decoder) = value(field, field.tpe, field.conditional, s"$path.${field.key}")
+      val selected                                                                                = check.fields(selections)
+      val members                                                                                 = check.possibleTypes(selections.parent)
+      val fields                                                                                  = selected.map { field =>
+        val (tpe, decoder) =
+          if (field.name == "__typename") {
+            val (literals, decoder) = oneOf(members, s"a type that ${selections.parent} can be")
+            if (field.conditional) optional(literals, decoder) else (literals, decoder)
+          } else value(field, field.tpe, field.conditional, s"$path.${field.key}")
         (field.key, tpe, decoder)
       }
-      val refined  = fields.foldLeft(TypeRepr.of[Record]) { case (record, (key, tpe, _)) =>
+      val typename                                                                                = selected.find(field => field.name == "__typename" && !field.conditional).map(_.key)
+      val specific                                                                                = selected.exists(field => !selections.worlds.subsetOf(field.on))
+      val views                                                                                   =
+        if (members.size > 1 && specific) typename.toList.flatMap { key =>
+          members.map { member =>
+            val (tpe, decoder) = record(check.view(selections, member), s"$path as $member")
+            (
+              s"as$member",
+              TypeRepr.of[Option].appliedTo(tpe),
+              '{ Record.member(${ Expr(key) }, ${ Expr(member) }, $decoder) }
+            )
+          }
+        }
+        else Nil
+      val refined                                                                                 = (fields ++ views).foldLeft(TypeRepr.of[Record]) { case (record, (key, tpe, _)) =>
         Refinement(record, key, tpe)
       }
-      val pairs    = Expr.ofList(fields.map { case (key, _, decoder) => '{ (${ Expr(key) }, $decoder) } })
-      (refined, '{ Record.decoder($pairs) })
+      def pairs(of: List[(String, TypeRepr, Expr[Decoder[?]])]): Expr[List[(String, Decoder[?])]] =
+        Expr.ofList(of.map { case (key, _, decoder) => '{ (${ Expr(key) }, $decoder) } })
+      (refined, '{ Record.decoder(${ pairs(fields) }, ${ pairs(views) }) })
     }
 
     def value(field: Check.Field, tpe: GqlType, conditional: Boolean, path: String): (TypeRepr, Expr[Decoder[?]]) =

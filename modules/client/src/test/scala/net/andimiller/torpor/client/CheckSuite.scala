@@ -125,6 +125,24 @@ final class CheckSuite extends munit.FunSuite {
     assertEquals(keys("{ shelves { __typename name } }", "shelves"), List("__typename" -> false, "name" -> false))
   }
 
+  test("the possible types of an interface are the types that implement it") {
+    val (check, _) = checked("{ shelves { name } }")
+
+    assertEquals(check.possibleTypes("Item"), List("Book", "Film"))
+  }
+
+  test("the view of an interface as one implementer has that implementer's fields, always there") {
+    val (check, operation) =
+      checked("{ shelves { items { __typename title ... on Book { pages } ... on Film { minutes } } } }")
+    val shelves            = check.fields(check.root(operation).get).head.beneath
+    val items              = check.fields(shelves).head.beneath
+
+    assertEquals(
+      check.fields(check.view(items, "Book")).map(field => field.key -> field.conditional),
+      List("__typename" -> false, "title" -> false, "pages" -> false)
+    )
+  }
+
   test("a mutation starts from the mutation type") {
     val (check, operation) =
       checked("mutation M($name: String!, $to: String!) { rename(name: $name, to: $to) { name } }")

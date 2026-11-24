@@ -70,6 +70,20 @@ final class TypedOperationSuite extends munit.FunSuite {
     assertEquals(pets().variables.toMap, Map.empty)
   }
 
+  test("a union has a view per member when the document selects __typename") {
+    val home =
+      petshop.operation("{ home(pet: \"1\") { __typename ... on Owner { name } ... on Shelter { capacity } } }")
+
+    val read: home.Data => Option[Int] = _.home.flatMap(_.asShelter).map(_.capacity)
+  }
+
+  test("a union has no view per member when the document does not select __typename") {
+    val home   = petshop.operation("{ home(pet: \"1\") { ... on Owner { name } ... on Shelter { capacity } } }")
+    val errors = compileErrors("""Option.empty[home.Data].flatMap(_.home).flatMap(_.asShelter)""")
+
+    assert(errors.contains("asShelter"), errors)
+  }
+
   test("an enum variable takes a literal of its values") {
     val pets = petshop.operation("query P($species: Species) { pets(species: $species) { name } }")
 

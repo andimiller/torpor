@@ -189,6 +189,19 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
     }
   }
 
+  /** The view of a union or interface value as one of the types it can be: the selections that apply in the worlds
+    * where it is that type.
+    */
+  def view(selections: Selections, member: String): Selections =
+    Selections(
+      member,
+      selections.entries.map(entry => entry.copy(worlds = entry.worlds.filter(_.last == member))),
+      selections.worlds.filter(_.last == member)
+    )
+
+  /** The object types a value of the named type can be, in a stable order. */
+  def possibleTypes(name: String): List[String] = possible(name).toList.sorted
+
   /** The response keys selected, with fragments expanded. A selection that applies in no world selects nothing. */
   private def collect(entries: List[Entry], skippable: Boolean): List[(String, Selected)] =
     entries.filter(_.worlds.nonEmpty).flatMap { case Entry(written, selection, worlds) =>
