@@ -127,3 +127,27 @@ All three from `pitch.md` are met and tested:
   never caller credentials. A resolver that needs live caller credentials cannot suspend.
 - A deploy invalidates in-flight suspended runs (schema hash mismatch). No snapshot migration.
 - Suspension granularity is a plan node, not an entity: `Pet.owner` suspends for the whole group.
+
+## Client
+
+The calling side: `torpor-client` checks an operation when the code that states it compiles, and runs it over HTTP.
+
+| Feature | State |
+|---|---|
+| The document validated against the schema, with the same validator the server runs | yes |
+| A document built from literals and `inline val`s with `s"…"`, `+` or `stripMargin` | yes |
+| The schema as a constant, `Api.sdl(…)`: a literal or an `inline val` | yes |
+| The schema parsed once per compiler, however many operations and calls read it | yes |
+| Nullable fields, and fields a fragment or `@skip`/`@include` may leave out, read as `Option` | yes |
+| A field selected for every member of a union or interface read without `Option` | yes; a field beneath an object that only one member's fragment selects is an `Option` too |
+| One response key selected with different types in different fragments | rejected by the validator (5.3.2) |
+| `Api.sdl(schema).operation(document)`: the response type written from the document, as a record with a member per selected field | yes |
+| A union or interface in a typed response: `__typename` as the literal names of its types, and a view per type (`asShelter`) when the document selects `__typename` and fields for some types | yes |
+| Leaves read as the type the `Api` binds with `read`, for a field (`"Pet.id"`) or for its type (`"ID"`) | yes |
+| Variables given by name and checked against the declared ones, with optional ones left out; `None` and `Nil` as values; `null` sent as null | yes |
+| Input objects written with `input(…)` and checked against the schema's input type | yes; a list of differently-shaped inputs is taken on trust |
+| A type of the caller's own standing for a whole input object, encoded by its own `Encoder` | yes |
+| Enum values as a literal union in the response | yes: an unbound enum is `"DOG" \| "CAT"`, decoded as one of those |
+| Running an operation over http4s, with response errors raised as `GraphQLFailure`, from a 4xx or 5xx as well as a 200 | yes |
+| Partial data alongside errors | no: any error fails the call |
+| Subscriptions, `@defer`, persisted queries | no |
