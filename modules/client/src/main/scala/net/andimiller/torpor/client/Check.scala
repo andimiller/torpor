@@ -15,7 +15,8 @@ import net.andimiller.torpor.schema.{
 
 /** What an operation selects, as the macro that writes its response type reads it.
   *
-  * A field behind `@skip` or `@include` is conditional: the response may not carry it.
+  * A field selected inside a fragment that only some types match, or behind `@skip` or `@include`, is conditional: the
+  * response may not carry it.
   */
 object Check {
 
@@ -93,7 +94,7 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
     * has already checked that every selection of it has the same type (5.3.2).
     */
   def fields(selections: Selections): List[Field] = {
-    val selected = collect(selections.entries)
+    val selected = collect(selections.entries, skippable = false)
     val keys     = selected.map(_._1).distinct
     keys.map { key =>
       val occurrences = selected.collect { case (`key`, field) => field }
@@ -111,10 +112,11 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
     }
   }
 
-  /** The response keys selected. A selection that applies in no world selects nothing. */
-  private def collect(entries: List[Entry]): List[(String, Selected)] =
+  /** The response keys selected, with fragments expanded. A selection that applies in no world selects nothing. */
+  private def collect(entries: List[Entry], skippable: Boolean): List[(String, Selected)] =
     entries.filter(_.worlds.nonEmpty).flatMap { case Entry(written, selection, worlds) =>
-      val maybe = selection.directives.exists(directive => directive.name == "skip" || directive.name == "include")
+      val maybe =
+        skippable || selection.directives.exists(directive => directive.name == "skip" || directive.name == "include")
       selection match {
         case field: FieldSelection if field.name == "__typename" =>
           val tpe = TypeRef.NonNull(TypeRef.Named("String"))
@@ -131,9 +133,22 @@ final private[client] class Check(schema: Schema, document: ExecutableDocument) 
               maybe
             )
           }
-        case _: InlineFragment | _: FragmentSpread               => Nil
+        case inline: InlineFragment                              =>
+          val condition = inline.typeCondition.getOrElse(written)
+          collect(inline.selections.map(Entry(condition, _, matching(worlds, condition))), maybe)
+        case spread: FragmentSpread                              =>
+          document.fragment(spread.name).toList.flatMap { fragment =>
+            val condition = fragment.typeCondition
+            collect(fragment.selections.map(Entry(condition, _, matching(worlds, condition))), maybe)
+          }
       }
     }
+
+  /** The worlds a fragment on `condition` applies to. */
+  private def matching(worlds: Set[World], condition: String): Set[World] = {
+    val members = possible(condition)
+    worlds.filter(world => members(world.last))
+  }
 
   /** The worlds beneath a field of the named type: each world, extended with each type the value can be. */
   private def within(worlds: Set[World], name: String): Set[World] =

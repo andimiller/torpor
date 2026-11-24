@@ -42,8 +42,65 @@ final class CheckSuite extends munit.FunSuite {
     check.fields(at).map(field => field.key -> field.conditional)
   }
 
-  test("a field is always in the response") {
+  test("a field selected outside any fragment is always in the response") {
     assertEquals(keys("{ shelves { name tags } }", "shelves"), List("name" -> false, "tags" -> false))
+  }
+
+  test("a field of an interface, selected outside any fragment, is always there") {
+    assertEquals(keys("{ shelves { items { title } } }", "shelves", "items"), List("title" -> false))
+  }
+
+  test("a field selected in one implementer's fragment may be missing") {
+    assertEquals(keys("{ shelves { items { ... on Book { pages } } } }", "shelves", "items"), List("pages" -> true))
+  }
+
+  test("a field selected for every implementer is always there") {
+    assertEquals(
+      keys("{ shelves { items { ... on Book { id } ... on Film { id } } } }", "shelves", "items"),
+      List("id" -> false)
+    )
+  }
+
+  test("a named fragment is read like an inline one") {
+    assertEquals(
+      keys("query Q { shelves { items { ...Length } } } fragment Length on Film { minutes }", "shelves", "items"),
+      List("minutes" -> true)
+    )
+  }
+
+  test("a field selected in every member's fragment is always there, though each selects other fields beneath it") {
+    assertEquals(
+      keys(
+        "{ shelves { items { ... on Book { author { name } } ... on Film { author { born } } } } }",
+        "shelves",
+        "items"
+      ),
+      List("author" -> false)
+    )
+  }
+
+  test("a field selected beneath only one member's fragment may be missing") {
+    assertEquals(
+      keys(
+        "{ shelves { items { ... on Book { author { name } } ... on Film { author { born } } } } }",
+        "shelves",
+        "items",
+        "author"
+      ),
+      List("name" -> true, "born" -> true)
+    )
+  }
+
+  test("a field selected beneath every member's fragment is always there") {
+    assertEquals(
+      keys(
+        "{ shelves { items { ... on Book { author { name } } ... on Film { author { name } } } } }",
+        "shelves",
+        "items",
+        "author"
+      ),
+      List("name" -> false)
+    )
   }
 
   test("a field behind @include may be missing") {
