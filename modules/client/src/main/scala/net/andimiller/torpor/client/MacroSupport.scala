@@ -1,5 +1,7 @@
 package net.andimiller.torpor.client
 
+import java.util.concurrent.ConcurrentHashMap
+
 import cats.syntax.all.*
 import net.andimiller.torpor.schema.{Schema, SdlFragment}
 
@@ -52,11 +54,18 @@ private[client] object MacroSupport {
   /** The schema in the SDL, or a compile error. */
   def schemaInSdl(sdl: String)(using Quotes): Schema = parsed("schema", sdl)
 
+  // every operation and every call of one reads the schema, so each text is parsed once per compiler
+  private val schemas = new ConcurrentHashMap[String, Schema]
+
   private def parsed(label: String, sdl: String)(using Quotes): Schema = {
     import quotes.reflect.*
-    Schema.merge(List(SdlFragment(label, sdl))) match {
-      case Left(errors)  => report.errorAndAbort(errors.toChain.toList.map(_.render).mkString("\n"))
-      case Right(merged) => merged
+    Option(schemas.get(sdl)).getOrElse {
+      Schema.merge(List(SdlFragment(label, sdl))) match {
+        case Left(errors)  => report.errorAndAbort(errors.toChain.toList.map(_.render).mkString("\n"))
+        case Right(merged) =>
+          schemas.put(sdl, merged)
+          merged
+      }
     }
   }
 
