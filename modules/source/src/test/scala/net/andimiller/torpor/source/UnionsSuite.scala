@@ -95,6 +95,47 @@ final class UnionsSuite extends munit.CatsEffectSuite {
     }
   }
 
+  test("a field selected on an interface is served by each implementer's own resolver or value") {
+    // `size` is a resolver on Folder and a plain value on File, which the interface's definition cannot say
+    val files  = schema"""interface Entry { name: String! size: Int! }
+      |type File implements Entry { name: String! size: Int! }
+      |type Folder implements Entry { name: String! }
+      |extend type Folder { size: Int! }
+      |extend type Query { entries: [Entry!]! }"""
+    val source = Source[IO]("files", files)(
+      resolver.root[IO](files.Query.entries) { _ =>
+        IO.pure(
+          Json.arr(
+            Json
+              .obj("__typename"   -> Json.fromString("File"), "name"   -> Json.fromString("a"), "size" -> Json.fromInt(1)),
+            Json.obj("__typename" -> Json.fromString("Folder"), "name" -> Json.fromString("b"))
+          )
+        )
+      },
+      resolver
+        .field[IO](files.Folder.size)
+        .key((folder: Json) => folder.hcursor.get[String]("name").getOrElse(""))
+        .batch((_, keys: NonEmptyList[String]) => IO.pure(keys.toList.map(_ -> 7).toMap))
+    )
+    val torpor = Torpor[IO](source)
+    val schema = torpor.schema.fold(errors => fail(errors.toChain.toList.map(_.render).mkString("; ")), identity)
+
+    torpor.query(schema, "{ entries { name size } }") match {
+      case Left(error) => IO(fail(error.render.mkString("\n")))
+      case Right(io)   =>
+        io.map { response =>
+          assertEquals(response.errors.toList, Nil)
+          assertEquals(
+            response.data.hcursor
+              .downField("entries")
+              .values
+              .map(_.flatMap(_.hcursor.get[Int]("size").toOption).toList),
+            Some(List(1, 7))
+          )
+        }
+    }
+  }
+
   test("resolver.tagged puts __typename on a typed union member") {
     val base: Encoder[TaggedMember] = Encoder.AsObject.derived[TaggedMember]
     val tagged                      = resolver.tagged(base)(_.kind)
