@@ -41,8 +41,10 @@ final class HooksSuite extends munit.CatsEffectSuite {
           values: Map[String, Json]
       ) =
         IO.pure(
-          values.map { case (key, value) =>
-            key -> (if (key == "\"b\"") Left(HookError("not allowed", FieldError.Forbidden)) else Right(value))
+          values.map { case (id, value) =>
+            // the id is not the batch key, so the hook reads the value
+            val forbidden = value.hcursor.get[String]("id").contains("b-detail")
+            id -> (if (forbidden) Left(HookError("not allowed", FieldError.Forbidden)) else Right(value))
           }
         )
     }

@@ -24,7 +24,7 @@ final class InputObjectsSuite extends munit.CatsEffectSuite {
   private val sdl = schema"""scalar Instant
     |scalar Json
     |input FlagFilter { key: String!, value: Boolean! }
-    |input OrganizationFilters { hasFlags: [FlagFilter!], limit: Int = 5 }
+    |input OrganizationFilters { hasFlags: [FlagFilter!], limit: Int = 5, active: Boolean, parent: ID, flag: FlagFilter }
     |type Organization { id: ID! config: Json createdAt: Instant }
     |extend type Query {
     |  organizations(filters: OrganizationFilters): [Organization!]!
@@ -67,6 +67,28 @@ final class InputObjectsSuite extends munit.CatsEffectSuite {
       assertEquals(
         organization.downField("config").focus,
         Some(Json.obj("nested" -> Json.obj("x" -> Json.fromInt(1))))
+      )
+      assertEquals(response.errors.toList, Nil)
+    }
+  }
+
+  test("an input object's nullable fields may be left out, whatever their type") {
+    val query = """{ organizations(filters: {}) { id } }"""
+    execute(query).map { response =>
+      assertEquals(
+        response.data.hcursor.downField("organizations").downArray.get[String]("id").toOption,
+        Some("limit-5")
+      )
+      assertEquals(response.errors.toList, Nil)
+    }
+  }
+
+  test("an input object's nullable fields may be null, whatever their type") {
+    val query = """{ organizations(filters: { hasFlags: null, active: null, parent: null, flag: null }) { id } }"""
+    execute(query).map { response =>
+      assertEquals(
+        response.data.hcursor.downField("organizations").downArray.get[String]("id").toOption,
+        Some("limit-5")
       )
       assertEquals(response.errors.toList, Nil)
     }

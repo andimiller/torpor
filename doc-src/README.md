@@ -1,187 +1,532 @@
 # Torpor
 
-GraphQL for Scala that keeps the **contract as data** and the **code as code**.
+Contract-first, type-safe GraphQL library for Scala 3.
 
-You write the schema as SDL, check it when the code compiles, and register resolvers against field coordinates.
-Fan-out takes a batch of keys, so one request costs one call per level instead of one per row. When a backend is slow,
-the run suspends to a table and resumes when the work finishes — days later if needed.
+You write the schema as SDL, and the compiler checks it. Each extension field takes a batch of keys, so a query makes one call for each node, not one call for each row. When a backend is slow, a durable run stops, keeps its state in a store, and continues when the work is done, days later if necessary. Torpor is built on cats-effect and [hedgehogs](https://github.com/andimiller/hedgehogs).
 
-Built on cats-effect and [hedgehogs](https://github.com/andimiller/hedgehogs).
+## Contents
 
-```scala mdoc:compile-only
-import cats.data.NonEmptyList
-import cats.effect.IO
-import com.comcast.ip4s.*
-import net.andimiller.torpor.examples.esi.client.*
-import net.andimiller.torpor.http.TorporHttp
-import net.andimiller.torpor.macros.schema
-import net.andimiller.torpor.schema.Schema
-import net.andimiller.torpor.source.*
-import org.http4s.ember.server.EmberServerBuilder
+- [Key Concepts](#key-concepts)
+- [Getting started](#getting-started)
+    - [1. Add the dependencies](#1-add-the-dependencies)
+    - [2. Write the schema](#2-write-the-schema)
+    - [3. Write the sources](#3-write-the-sources)
+    - [4. Serve the schema](#4-serve-the-schema)
+    - [5. Write the golden file](#5-write-the-golden-file)
+    - [6. Look at the generated schema](#6-look-at-the-generated-schema)
+    - [7. Explain a plan](#7-explain-a-plan)
+- [Examples](#examples)
+- [Status](#status)
+- [What Torpor is not](#what-torpor-is-not)
+- [Modules](#modules)
+- [Build](#build)
+- [Glossary](#glossary)
 
-// 1. Write your domain types as usual. `EsiApi` is the client from examples/shared-esi. Your domain types know
-//    nothing about GraphQL: no effect fields, no schema annotations.
+## Key Concepts
 
-val esi: EsiApi[IO] = new EsiApi[IO] {
-  def characterIdByName(name: String): IO[Option[Long]]                    = IO.pure(None)
-  def characters(ids: NonEmptyList[Long]): IO[Map[Long, EsiCharacter]]     = IO.pure(Map.empty)
-  def corporations(ids: NonEmptyList[Long]): IO[Map[Long, EsiCorporation]] = IO.pure(Map.empty)
-  def alliances(ids: NonEmptyList[Long]): IO[Map[Long, EsiAlliance]]       = IO.pure(Map.empty)
-  // unused here; the route example in examples/esi serves these
-  def route(origin: Long, destination: Long, flag: Option[String]): IO[Option[List[Long]]]                        = IO.pure(None)
-  def systems(ids: NonEmptyList[Long]): IO[Map[Long, EsiSolarSystem]]                                             = IO.pure(Map.empty)
-  def constellations(ids: NonEmptyList[Long]): IO[Map[Long, EsiConstellation]]                                    = IO.pure(Map.empty)
-  def names(ids: NonEmptyList[Long]): IO[Map[Long, String]]                                                       = IO.pure(Map.empty)
-}
+### The schema is the contract
 
-// 2. Say which Scala type a GraphQL scalar's arguments decode to. This lives in the wiring, not on the domain types:
-//    ESI ids are numbers, so `ID` arguments decode as `Long`.
-given Scalar["ID", Long]()
+Define your schema via SDL text directly in your source code. The compiler validates each SDL fragment and turns it into types that your resolvers work with directly. Schemas are parsed, validated and types generated at compile time without any code generation. The same SDL is the contract with your clients: a test writes the merged schema to a golden file, and each client checks its operations against that file when it compiles. Your Scala types do not know about GraphQL. In a code-first library, the schema is the graph of resolvers, so a type gets an effect field each time a value becomes lazy.
 
-// 3. Define one SDL fragment per source. Each is parsed and validated at compile time, and gives you the text to
-//    merge plus field coordinates as members: `universe.Character.corporation` compiles only if that SDL declares
-//    the field, and `characters.Query.character` carries the field's argument types.
-val characters = schema"""type Character { id: ID! name: String! }
-  |extend type Query { character(id: ID, name: String): Character }"""
-
-val universe = schema"""type Corporation { id: ID! name: String! }
-  |extend type Character { corporation: Corporation! }"""
-
-// 4. Wire up resolution: a root field's `args` are typed from its SDL arguments (`args.id: Option[Long]`), and a
-//    hydrated field takes a batch of keys. Hydration only runs when the client selects it, and then once for the
-//    whole set.
-val charactersSource = Source[IO]("characters", characters)(
-  resolver.root[IO](characters.Query.character) { args =>
-    args.id match {
-      case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
-      case None     =>
-        esi.characterIdByName(args.name.getOrElse("")).flatMap {
-          case None     => IO.pure(Option.empty[EsiCharacter])
-          case Some(id) => esi.characters(NonEmptyList.one(id)).map(_.get(id))
-        }
-    }
+```scala
+// Define a new schema fragment
+val pets = schema"""
+  extend type Query { # Make a root 'pets' field
+    pets: [Pet!]!     # available to query
   }
-)
+  type Pet {      # Define the new type 'Pet', with
+    id: ID!       # fields 'id' and 'name'
+    name: String!
+  }
+  """
+```
 
-val universeSource = Source[IO]("universe", universe)(
-  resolver.field[IO](universe.Character.corporation)
-    .key((character: EsiCharacter) => character.corporationId)
-    .batch((_, ids: NonEmptyList[Long]) => esi.corporations(ids))
-)
+### Sources implement the schema with Resolvers
 
-// 5. Assemble. Each source's type records the fields its SDL must resolve and what its resolvers produce and
-//    decode, so this compile-time check proves every source resolves exactly its required fields (here
-//    `Query.character` and `Character.corporation`) and that the sources link: `Character.corporation` reads
-//    `corporationId` from the characters the other source produces. `startup` merges the fragments, repeats the
-//    coverage check against the merged schema, and raises one exception listing every problem.
-val started: IO[(Torpor[IO], Schema)] = Torpor[IO](charactersSource, universeSource).startup
+A source combines an SDL fragment with its backend implementation. Torpor calls that resolver only when a query selects the field, making hydration lazy.
 
-// 6. Mount into a server: one http4s route, the same one for every schema.
-val server = started.flatMap { case (torpor, schema) =>
-  EmberServerBuilder
-    .default[IO]
-    .withHost(host"0.0.0.0")
-    .withPort(port"8080")
-    .withHttpApp(TorporHttp.routes(torpor, schema).orNotFound)
-    .build
-    .useForever
+```scala
+// Our Scala type for a pet. 'ownerId' is not in the SDL: it is the key for the owner
+final case class Pet(id: String, name: String, ownerId: String) derives Encoder.AsObject, Decoder
+
+// Our backend which can get the list of pets
+trait PetStore[F[_]] {
+  def loadAll: F[List[Pet]]
+}
+val petStore = PetStore.impl[IO](...)
+
+// Add a Source for the 'pets' schema
+val petsSource =
+  Source[IO](
+    id = "pets", // A unique name for the source
+    sdl = pets)( // Points to the SDL we defined
+      resolver.root[IO]( // A resolver matching a root field
+        pets.Query.pets  // The SDL field, presented by Torpor as a typed value
+      )(_ => petStore.loadAll) // Wire the query to our backend implementation
+  )
+```
+
+### Sources can be composed, with built-in batching
+
+Multiple sources can be combined into a single schema. Sources can add extra fields to already-declared types via `extend type`. Resolvers for extension fields are the key to batching - allowing all values to be retried at the same time once the parent is. When you compose the sources, the compiler checks that every extension has exactly one resolver, and that each key function reads the Scala type that another source makes. At startup, Torpor merges the fragments and checks the merged schema. A batch function takes a `NonEmptyList` of keys and returns a `Map`. There is no form that takes one key, so an N+1 query cannot occur.
+
+```scala
+// Define a second fragment, which adds a field to 'Pet'
+val owners = schema"""
+  type Owner {        # Define the new type 'Owner'
+    name: String!
+  }
+  extend type Pet {   # Add a field to 'Pet', which
+    owner: Owner      # the 'pets' source declares
+  }
+  """
+
+// Our backend which can get many owners in one call
+trait OwnerStore[F[_]] {
+  def loadByIds(ids: NonEmptyList[String]): F[Map[String, Owner]]
+}
+val ownerStore = OwnerStore.impl[IO](...)
+
+// Add a Source for the 'owners' schema
+val ownersSource =
+  Source[IO](
+    id = "owners", // A unique name for the source
+    sdl = owners)( // Points to the SDL we defined
+      resolver
+        .field[IO](  // A resolver for a field added to another type
+          owners.Pet.owner   // The extra SDL field added by our extension
+      )
+      .key(
+        (pet: Pet) => // The pet as resolved by our original `petsSource`
+          pet.ownerId // The field used to find the owner
+      )
+      .batch(
+        (_, ownerIds) => // The owner IDs, all batched together
+          ownerStore.loadByIds(ownerIds) // How to find the owner in our backend
+      )
+  )
+
+// Compose both sources, with compiler checking that dependencies between them are satisfied
+val torpor =
+  Torpor[IO](petsSource, ownersSource)
+```
+
+### A plan is data
+
+Torpor generates plans as a graph of dependencies. At query time, Torpor validates the request, generates a plan, and then executes it. Plans are optimised for parallelism and batching; non-dependent nodes in the plan are run concurrently, and dependent nodes apply batching. Plans can be inspected with `Explain`, and are durable to allow for long-running requests. A plan is plain data: the executor runs it, a durable run stores it, and Explain draws it. What you inspect is what runs.
+
+For example, this query:
+
+```graphql
+{
+  pets { owner { name } vet { name } }
+  shelters { name }
 }
 ```
 
-Every line above is compiled by mdoc. The runnable version, with the ESI client from
-`examples/shared-esi`, real arguments and a live server, is [`examples/esi`](examples/esi).
+has a plan with four nodes:
 
-## Why
+```mermaid
+flowchart LR
+  pets["Query.pets"] -->|ownerIds| owner["Pet.owner"]
+  pets -->|vetIds| vet["Pet.vet"]
+  shelters["Query.shelters"]
+```
 
-**The contract is data; the code is code.** The SDL is a text artefact: reviewable, diffable, sendable to a
-client team, checked by `schema"""…"""` at compile time. Resolvers are functions in a table, and your domain
-types never learn that GraphQL exists. In code-first libraries the schema *is* the resolver graph, so a data
-type grows an effect field every time a value becomes lazy, and the effect type decides the
-contract's nullability.
+- `Query.pets` and `Query.shelters` may start at the same time.
+- `Pet.owner` and `Pet.vet` need ids from `Query.pets`. These start when `Query.pets` is resolved, and they run at the same time.
 
-**Batching is impossible to get wrong.** A resolver that fans out takes `NonEmptyList[K] => F[Map[K, V]]`.
-There is no single-key overload, so three characters cost one corporations call, not three — the plan groups
-each level and dedupes keys. Against ESI, character rows are two batch requests for any number of ids
-(`characters/affiliation/` plus `universe/names/`), and a route's regions are one; the test suite pins the
-call counts.
+### A run can outlive the request
 
-**A run can outlive the request.** `Step.suspend(handle)` parks the whole run: the snapshot (plan, node
-states, handles) goes to a `SnapshotStore` with compare-and-swap on a revision, so two webhooks racing to
-resume cannot both execute. Resume from a fresh process with a fresh runtime; nothing but the stored JSON is
-needed. No workflow engine involved.
+A resolver can stop the whole run with `Step.suspend(handle)`. Torpor then keeps the plan, the finished nodes and the handles in a `SnapshotStore`, in memory or in Postgres. Later, a webhook resumes the run, in a different process if necessary. The store uses compare-and-swap, so when two webhooks try to resume the same run, only one of them runs it. You do not need a workflow engine.
 
-**One contract, one plan.** `Plan` is plain serialisable data — the same value the executor runs, the snapshot
-stores, and `Explain.mermaid` draws. What you inspect is what runs: the example serves `POST /explain`, which prints the plan for a query without
-executing a resolver.
+### Errors are values
+
+Failed resolvers do not cause a whole query to fail, instead returning partial failures, with an error at the path of each field that the resolver could not serve.
+
+## Getting started
+
+This guide makes a small pet shop server from the two sources in Key Concepts, and a third source for shelters. It serves the schema over HTTP, writes the schema to a golden file, and prints the plan for a query.
+
+Torpor needs Scala 3.3 or later, cats-effect 3, circe 0.14 and http4s 0.23. In the samples, replace `@VERSION@` with the Torpor release that you use.
+
+### 1. Add the dependencies
+
+```scala
+libraryDependencies ++= Seq(
+  "net.andimiller" %% "torpor-source"       % "@VERSION@",
+  "net.andimiller" %% "torpor-macros"       % "@VERSION@",
+  "net.andimiller" %% "torpor-http"         % "@VERSION@",
+  "net.andimiller" %% "torpor-explain"      % "@VERSION@",
+  "org.http4s"     %% "http4s-ember-server" % "0.23.30",            // or a different http4s server
+  "net.andimiller" %% "torpor-testkit"      % "@VERSION@" % Test
+)
+```
+
+### 2. Write the schema
+
+Put the fragments in an object, so that the server and the golden test in step 5 can both use them.
+
+```scala mdoc:silent
+import net.andimiller.torpor.macros.schema
+
+// The schema: one fragment for each source
+object PetshopSchema {
+  val pets = schema"""
+    extend type Query { # Make a root 'pets' field
+      pets: [Pet!]!     # available to query
+    }
+    type Pet {          # Define the new type 'Pet', with
+      id: ID!           # fields 'id' and 'name'
+      name: String!
+    }
+    """
+
+  val owners = schema"""
+    type Owner {        # Define the new type 'Owner'
+      name: String!
+    }
+    extend type Pet {   # Add a field to 'Pet', which
+      owner: Owner      # the 'pets' source declares
+    }
+    """
+
+  val shelters = schema"""
+    extend type Query {     # Make a root 'shelters' field
+      shelters: [Shelter!]! # available to query
+    }
+    type Shelter {          # Define the new type 'Shelter'
+      name: String!
+    }
+    """
+}
+```
+
+### 3. Write the sources
+
+This step uses backends that keep their data in memory. In your service, they call your databases or other services.
+
+```scala mdoc:silent
+import cats.data.NonEmptyList
+import cats.effect.IO
+import io.circe.{Decoder, Encoder}
+import net.andimiller.torpor.source.*
+
+// Our Scala types. 'ownerId' is not in the SDL: it is the key for the owner
+final case class Pet(id: String, name: String, ownerId: String) derives Encoder.AsObject, Decoder
+final case class Owner(name: String) derives Encoder.AsObject
+final case class Shelter(name: String) derives Encoder.AsObject
+
+// Our backends
+trait PetStore[F[_]] {
+  def loadAll: F[List[Pet]]
+}
+trait OwnerStore[F[_]] {
+  def loadByIds(ids: NonEmptyList[String]): F[Map[String, Owner]]
+}
+trait ShelterStore[F[_]] {
+  def loadAll: F[List[Shelter]]
+}
+
+// In-memory backends for this example
+val petStore = new PetStore[IO] {
+  def loadAll: IO[List[Pet]] =
+    IO.pure(List(Pet("1", "Rex", "alice"), Pet("2", "Tom", "bob"), Pet("3", "Fido", "alice")))
+}
+val ownerStore = new OwnerStore[IO] {
+  private val owners = Map("alice" -> Owner("Alice"), "bob" -> Owner("Bob"))
+  def loadByIds(ids: NonEmptyList[String]): IO[Map[String, Owner]] =
+    IO.pure(ids.toList.flatMap(id => owners.get(id).map(id -> _)).toMap)
+}
+val shelterStore = new ShelterStore[IO] {
+  def loadAll: IO[List[Shelter]] =
+    IO.pure(List(Shelter("Northside Rescue"), Shelter("Harbour Animal Home")))
+}
+
+// A Source for the 'pets' fragment
+val petsSource =
+  Source[IO](
+    id = "pets",              // A unique name for the source
+    sdl = PetshopSchema.pets  // Points to the SDL we defined
+  )(
+    resolver.root[IO](              // A resolver matching a root field
+      PetshopSchema.pets.Query.pets // The SDL field, presented by Torpor as a typed value
+    )(_ => petStore.loadAll)        // Wire the query to our backend
+  )
+
+// A Source for the 'owners' fragment
+val ownersSource =
+  Source[IO](
+    id = "owners",              // A unique name for the source
+    sdl = PetshopSchema.owners  // Points to the SDL we defined
+  )(
+    resolver
+      .field[IO](                      // A resolver for a field added to another type
+        PetshopSchema.owners.Pet.owner // The extra SDL field added by our extension
+      )
+      .key(
+        (pet: Pet) =>   // The pet as resolved by the 'pets' source
+          pet.ownerId   // The field used to find the owner
+      )
+      .batch(
+        (_, ownerIds) =>                  // The owner ids, all batched together
+          ownerStore.loadByIds(ownerIds)  // How to find the owners in our backend
+      )
+  )
+
+// A Source for the 'shelters' fragment
+val sheltersSource =
+  Source[IO](
+    id = "shelters",              // A unique name for the source
+    sdl = PetshopSchema.shelters  // Points to the SDL we defined
+  )(
+    resolver.root[IO](                      // A resolver matching a root field
+      PetshopSchema.shelters.Query.shelters // The SDL field, presented by Torpor as a typed value
+    )(_ => shelterStore.loadAll)            // Wire the query to our backend
+  )
+```
+
+### 4. Serve the schema
+
+```scala mdoc:silent
+import cats.effect.{IO, IOApp}
+import com.comcast.ip4s.*
+import net.andimiller.torpor.http.TorporHttp
+import org.http4s.ember.server.EmberServerBuilder
+import org.http4s.implicits.*
+
+object PetshopServer extends IOApp.Simple {
+  def run: IO[Unit] =
+    Torpor[IO](petsSource, ownersSource, sheltersSource) // Compose the sources: the compiler checks their wiring
+      .startup                           // Merge the fragments and check the merged schema
+      .flatMap { case (torpor, schema) =>
+        EmberServerBuilder
+          .default[IO]
+          .withPort(port"8080")
+          .withHttpApp(TorporHttp.routes(torpor, schema).orNotFound) // Serve POST /graphql
+          .build
+          .useForever
+      }
+}
+```
+
+Run `PetshopServer`, then send a query:
+
+```bash
+curl -s localhost:8080/graphql \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "{ pets { name owner { name } } shelters { name } }"}'
+```
+
+The response, formatted:
+
+```json
+{
+  "data": {
+    "pets": [
+      { "name": "Rex",  "owner": { "name": "Alice" } },
+      { "name": "Tom",  "owner": { "name": "Bob" } },
+      { "name": "Fido", "owner": { "name": "Alice" } }
+    ],
+    "shelters": [
+      { "name": "Northside Rescue" },
+      { "name": "Harbour Animal Home" }
+    ]
+  }
+}
+```
+
+Torpor makes three calls for this query: one to the pets `loadAll`, one to the shelters `loadAll`, and one to `loadByIds` with the ids `alice` and `bob`. Rex and Fido have the same owner, so Torpor sends `alice` one time only. The query `{ pets { name } }` makes one call only, because it does not select `owner` or `shelters`.
+
+### 5. Write the golden file
+
+Add a test that writes the merged schema to a file:
+
+```scala mdoc:silent
+import java.nio.file.Paths
+import net.andimiller.torpor.core.Sdl
+import net.andimiller.torpor.testkit.GoldenGraphqlsTest
+
+final class PetshopSchemaTest extends GoldenGraphqlsTest {
+  def schemas: List[Sdl[?]] = List(PetshopSchema.pets, PetshopSchema.owners, PetshopSchema.shelters) // The fragments to merge
+  override def golden       = Paths.get("src/test/resources/petshop.graphqls") // Where to write them
+}
+```
+
+If the file does not exist, the test writes it. Review the file and commit it. After that, the test fails with a diff when the schema changes.
+
+### 6. Look at the generated schema
+
+The first run of the test writes this file:
+
+```graphql
+type Owner {
+  name: String!
+}
+
+type Pet {
+  id: ID!
+  name: String!
+  owner: Owner
+}
+
+type Query {
+  pets: [Pet!]!
+  shelters: [Shelter!]!
+}
+
+type Shelter {
+  name: String!
+}
+```
+
+The file has no `extend type`. Torpor merges each extension into the type that it extends, and makes the `Query` type because no fragment declares it. The `#` comments are not in the file. This file is the contract that you give to the teams that call your server.
+
+### 7. Explain a plan
+
+`Explain` prints the plan for a query, but does not run it. Use it to see the calls that a query will make.
+
+```scala mdoc:silent
+import cats.effect.IO
+import net.andimiller.torpor.explain.Explain
+import net.andimiller.torpor.schema.{Executable, Schema}
+import net.andimiller.torpor.source.Planner
+
+// Print the plan for a query, without running it
+def explain(schema: Schema, query: String): String = {
+  val explained = for {
+    validated <- Executable.validate(schema, query)              // Check the query against the schema
+                   .left.map(_.toChain.toList.map(_.render))
+    plan      <- Planner.build(schema, validated)                // Make the plan
+                   .left.map(_.toChain.toList.map(_.render))
+  } yield Explain.mermaid(plan) + "\n\n" + Explain.report(plan)  // Draw it, and count its calls
+  explained.fold(_.mkString("\n"), identity)
+}
+
+// Explain a query against the merged schema
+Torpor[IO](petsSource, ownersSource, sheltersSource).startup.map { case (_, schema) =>
+  println(explain(schema, "{ pets { name owner { name } } shelters { name } }"))
+}
+```
+
+It prints:
+
+```text
+flowchart LR
+  n0["pets: Query.pets"]
+  n1["owners: Pet.owner"]
+  n2["shelters: Query.shelters"]
+  n0 --> n1
+
+depth 3, 6 fields, 3 calls over 2 level(s)
+level 1: pets x1 (Query.pets); shelters x1 (Query.shelters)
+level 2: owners x1 (Pet.owner)
+```
+
+The first part is a Mermaid flowchart, with one node for each batch call:
+
+```mermaid
+flowchart LR
+  n0["pets: Query.pets"]
+  n1["owners: Pet.owner"]
+  n2["shelters: Query.shelters"]
+  n0 --> n1
+```
+
+`Query.shelters` has no edge: it needs no keys from another node, so it runs at the same time as `Query.pets`. `Pet.owner` needs the owner ids from `Query.pets`, so it starts when `Query.pets` is done.
+
+The report gives the depth of the query, the number of fields it selects, and the number of calls. Then it gives one line for each level: the sources at that level, their number of calls, and their fields.
+
+## Examples
+
+The repository has two complete services. Both serve ESI, the public API of EVE Online.
+
+| Example | Contents |
+| --- | --- |
+| [`examples/esi`](examples/esi) | A Torpor server with three sources, lazy hydration, a route that fans out over many levels, a `POST /explain` route, and tests that count the calls of each query |
+| [`examples/esi-caliban`](examples/esi-caliban) | The same service, written with Caliban. Compare it with `examples/esi` to see the differences between the two libraries. Its tests count the calls of each query, which shows why the batch signature matters. |
 
 ## Status
 
-Works today:
+These features work now:
 
 | Feature | What works |
-|---|---|
-| SDL | per-source fragments, `extend` across sources, merge with typed errors carrying `source:line:column` |
-| Compile-time checks | `schema"""…"""` (text + coordinates, validated; an undeclared coordinate does not compile; root resolver arguments typed from the SDL) and `sdl"""…"""` (text only); assembling sources checks that each source resolves exactly the fields its SDL requires, and that every keyed field's parent type has the fields it reads |
-| Validation | a documented subset of the spec's rules; unsupported constructs fail loudly |
-| Planner | query → DAG of batch calls, normalised selection sets, variables substituted to literals, SDL defaults filled, input values coerced |
-| Batched arguments | every field's arguments are typed from the SDL and reach the batch once per argument set (`cohorts(first: 2)` is one call for every parent in that node) |
-| Union/interface planning | inline and named fragments with type conditions, `__typename` anywhere; a resolver tags a member with `resolver.tagged` or its own `__typename` |
-| Null bubbling | a null in a non-null position nulls the nearest nullable ancestor and keeps the error at the original path |
-| Executor | one call per node per level, errors as values with response paths, alias-keyed assembly |
-| Hooks | `Hooks[F]`: per-node spans and timing, slow-query log, per-batch authorization, one global error mapper (`INVALID_INPUT` for arguments the client got wrong) |
-| Limits | `maxDepth`, `maxFields`, coverage check (at compile time, and again at startup) |
-| Durable runs | suspend/resume, `SnapshotStore` (in-memory, and Postgres via skunk) with `claim` |
-| HTTP | `POST /graphql`, GraphQL errors as 200s; a `Request[F] => F[Unit]` setup hook for per-request context (`IOLocal`) |
-| Tools | introspection (`__schema`, `__type`) with unions, interfaces, inputs, scalars, defaults and deprecations, `Explain.mermaid` / `Explain.report` |
-| Relay | `torpor-relay`: `Connection[A]`, `PageInfo`, `PageArgs` and one slicing function for `first/after/last/before` |
+| --- | --- |
+| SDL | A fragment for each source, `extend type` across sources, and merge errors with `source:line:column` |
+| Compile-time checks | `schema"""…"""` validates a fragment and gives its field values. A field that the SDL does not declare does not compile. When you compose sources, the compiler checks that each source resolves exactly the fields that its SDL requires, and that each key function reads a type that another source makes. |
+| Validation | A documented subset of the rules of the specification. A construct that Torpor does not support fails with an error. |
+| Planner | A query becomes a graph of batch calls. Variables become literals, SDL defaults are filled in, and input values are coerced. |
+| Batched arguments | The arguments of each field are typed from the SDL, and come to the batch function one time for each set of arguments |
+| Unions and interfaces | Fragments with type conditions, and `__typename` in all positions. A resolver gives the member type with `resolver.tagged`, or with its own `__typename`. |
+| Null bubbling | A null in a non-null field moves up to the nearest nullable parent. The error keeps the path of the field. |
+| Executor | One call for each node. A node starts when the node that gives its keys is done. Errors are values, with response paths. |
+| Hooks | `Hooks[F]`: a span and timing for each node, a slow-query log, authorization for each batch, and one error mapper |
+| Limits | `maxDepth` and `maxFields` |
+| Durable runs | Suspend and resume, with a `SnapshotStore` in memory or in Postgres |
+| HTTP | `POST /graphql`, with GraphQL errors as status 200, and a setup function for each request |
+| Tools | Introspection, `Explain.mermaid` and `Explain.report` |
+| Relay | `torpor-relay`: `Connection[A]`, `PageInfo` and `PageArgs` |
 
-Not built yet — do not assume these work:
+These features are not built yet:
 
-- `@defer`/`@stream`, SSE, a resume endpoint (M2). A suspended run is usable programmatically only.
-- Subscriptions. Keyed (batch) fields cannot suspend. Node timeouts, cost metrics, a per-run cross-level result cache.
-- Full spec value coercion for custom scalars: a custom scalar's input decoding is whatever `Decoder` its `Scalar` binding names.
-- Postgres store integration tests (it compiles; the CAS contract is proven against the in-memory store).
-- Scala 2.13. The typed API is `inline`, match types, opaque types and macros; a 2.13 service talks to torpor over HTTP.
+- `@defer`, `@stream`, SSE, and an HTTP endpoint to resume a durable run. You resume a run from your own code only.
+- Subscriptions. Extension fields that suspend. Timeouts for each node, cost metrics, and a cache across levels.
+- The full coercion of values for custom scalars. The `Decoder` of the `Scalar` binding decodes the input.
+- Integration tests for the Postgres store. The compare-and-swap contract is tested against the in-memory store.
+- Scala 2.13. A Scala 2.13 service uses Torpor over HTTP.
 
-## What it is not
+## What Torpor is not
 
-- **Not a federation gateway.** Sources are in-process modules, not remote GraphQL services. Bring your own
-  clients.
-- **Not a SQL engine.** If your data is relational and query shape is everything, use
-  [Grackle](https://github.com/typelevel/grackle).
-- **Not ZIO.** `Torpor[F]` for `F[_]: Concurrent`.
-- **Not a client or a codegen.** [Caliban](https://github.com/ghostdogpr/caliban) covers that ground.
-- **Not complete.** See [docs/roadmap.md](docs/roadmap.md) for what is next.
+- **Not a federation gateway.** Sources are modules in your process, not remote GraphQL services.
+- **Not a SQL engine.** If your data is relational and the shape of the query is important, use [Grackle](https://github.com/typelevel/grackle).
+- **Not only for one effect type.** `Torpor[F]` works for any `F[_]: Concurrent`.
+- **Not a code generator.** [Caliban](https://github.com/ghostdogpr/caliban) generates code.
+- **Not complete.** [docs/roadmap.md](docs/roadmap.md) tells what comes next.
 
 ## Modules
 
-| Module | Owns |
-|---|---|
-| `torpor-core` | plan data, `Resolver` SPI, executor, response assembly |
-| `torpor-schema` | SDL merge, validation subset, executable documents, introspection |
-| `torpor-macros` | `schema"""…"""`, `sdl"""…"""` |
-| `torpor-source` | planner, resolver DSL, `Torpor` facade, `Durable` |
-| `torpor-snapshot` | snapshot codecs, `SnapshotStore` (in-memory + skunk) |
-| `torpor-explain` | mermaid plan, per-level call report |
-| `torpor-relay` | Relay `Connection`/`PageInfo` slicing, no core change |
-| `torpor-http` | http4s routes, per-request context setup |
-| `torpor-testkit` | golden test for the merged contract: sources in, one `.graphqls` out, a diff if it drifts |
+| Module | Contents |
+| --- | --- |
+| `torpor-core` | Plan data, the `Resolver` interface, the executor, and response assembly |
+| `torpor-schema` | SDL merge, validation, executable documents, and introspection |
+| `torpor-macros` | `schema"""…"""` and `sdl"""…"""` |
+| `torpor-source` | The planner, the resolver DSL, `Torpor`, and `Durable` |
+| `torpor-snapshot` | Snapshot codecs, and `SnapshotStore` in memory and in Postgres (skunk) |
+| `torpor-explain` | The Mermaid plan and the report of calls for each level |
+| `torpor-relay` | Relay `Connection` and `PageInfo` slicing |
+| `torpor-http` | The http4s route, and the setup function for each request |
+| `torpor-testkit` | The golden test for the merged schema |
 
-Only `torpor-schema` imports `sangria.*` (the parser).
-
-## Example
-
-[`examples/esi`](examples/esi) is a working service over EVE Online's ESI. It is unauthenticated, sets a custom
-User-Agent, looks characters up by id or name, and optionally hydrates corporation and alliance. It also serves a
-route between two solar systems that hydrates systems, constellations and regions — the multi-level fan-out — and
-a `/explain` route for the plan behind any query.
-[`examples/esi-caliban`](examples/esi-caliban) is the same character and corporation service in Caliban, for
-comparison — including the call counts that show why the batch signature matters.
+Only `torpor-schema` uses Sangria, for the parser.
 
 ## Build
 
-```
+```bash
 sbt test
 ```
 
-Scala 3.3 LTS, JVM.
+Torpor builds with Scala 3.3 LTS on the JVM.
+
+## Glossary
+
+This documentation uses each term below with one meaning only.
+
+| Term | Meaning |
+| --- | --- |
+| schema | The SDL that defines the types and fields that clients can query |
+| fragment | One part of the schema, written as SDL in `schema"""…"""` |
+| source | A fragment and the resolvers for the fields that it must resolve, with a unique `id` |
+| resolver | The function that gets the values of a field from your backend |
+| root field | A field of `Query` or `Mutation`. Its resolver gets the arguments of the field. |
+| extension field | A field that a source adds to a type with `extend type`. Its resolver gets a batch of keys. |
+| key function | The function that reads a key from each parent value, for example `pet.ownerId` |
+| batch | All the different keys for one node, given to the resolver in one call |
+| compose | To put sources together with `Torpor[IO](…)`. The compiler checks that each field has exactly one resolver. |
+| merged schema | The one schema that Torpor makes from all the fragments |
+| golden file | The merged schema in one `.graphqls` file, written by a test |
+| plan | The graph of dependencies that Torpor makes from a valid request |
+| node | One batch call in a plan |
+| level | The depth of a node in a plan. `Explain` groups nodes by level. |
+| run | One execution of a plan |
+| `Explain` | The module that prints a plan, but does not run it |
+| durable run | A run that can stop, keep its state in a store, and continue later. Use it for long-running requests. |

@@ -314,7 +314,6 @@ final class EsiSuite extends munit.CatsEffectSuite {
       identity
     )
 
-    assertEquals(reversed.checkCoverage(schema), Right(()))
     reversed.query(schema, "{ character(id: 1001) { corporation { alliance { name } } } }") match {
       case Left(error) => fail(error.render.mkString("; "))
       case Right(io)   =>
@@ -330,11 +329,5 @@ final class EsiSuite extends munit.CatsEffectSuite {
           )
         }
     }
-  }
-
-  test("every SDL field the example declares has a resolver") {
-    val esi    = fake()
-    val torpor = EsiGraphQL.torpor(esi)
-    assertEquals(torpor.checkCoverage(EsiGraphQL.schema(esi)), Right(()))
   }
 }

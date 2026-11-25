@@ -189,6 +189,11 @@ class PlannerSuite extends munit.FunSuite {
     assertEquals(plan.nodes.head.args, List(Argument("first", Value.IntValue(20))))
   }
 
+  test("a nullable variable with no value leaves its argument out") {
+    val plan = planOf("""query Q($species: Species) { pets(species: $species) { name } }""")
+    assertEquals(plan.nodes.head.args, List(Argument("first", Value.IntValue(20))))
+  }
+
   test("a missing variable with no default anywhere is an error") {
     val problems = planErrors("""query Q($species: Species!) { adoptionReport(species: $species) { adoptions } }""")
     assertEquals(problems.map(_.kind), List(PlanErrorKind.MissingVariable))
