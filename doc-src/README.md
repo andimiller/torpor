@@ -7,7 +7,7 @@ You write the schema as SDL, and the compiler checks it. Each extension field ta
 ## Contents
 
 - [Key Concepts](#key-concepts)
-- [Getting started](#getting-started)
+- [Getting Started - Server](#getting-started---server)
     - [1. Add the dependencies](#1-add-the-dependencies)
     - [2. Write the schema](#2-write-the-schema)
     - [3. Write the sources](#3-write-the-sources)
@@ -15,6 +15,15 @@ You write the schema as SDL, and the compiler checks it. Each extension field ta
     - [5. Write the golden file](#5-write-the-golden-file)
     - [6. Look at the generated schema](#6-look-at-the-generated-schema)
     - [7. Explain a plan](#7-explain-a-plan)
+- [Getting Started - Client](#getting-started---client)
+    - [1. Add the dependency](#1-add-the-dependency)
+    - [2. Copy the schema](#2-copy-the-schema)
+    - [3. Bind the schema to your types](#3-bind-the-schema-to-your-types)
+    - [4. Write an operation](#4-write-an-operation)
+    - [5. Make the client and run the operation](#5-make-the-client-and-run-the-operation)
+    - [6. Give variables](#6-give-variables)
+    - [7. Read unions, optional fields and enums](#7-read-unions-optional-fields-and-enums)
+    - [8. See what does not compile](#8-see-what-does-not-compile)
 - [Examples](#examples)
 - [Status](#status)
 - [What Torpor is not](#what-torpor-is-not)
@@ -144,7 +153,7 @@ A resolver can stop the whole run with `Step.suspend(handle)`. Torpor then keeps
 
 Failed resolvers do not cause a whole query to fail, instead returning partial failures, with an error at the path of each field that the resolver could not serve.
 
-## Getting started
+## Getting Started - Server
 
 This guide makes a small pet shop server from the two sources in Key Concepts, and a third source for shelters. It serves the schema over HTTP, writes the schema to a golden file, and prints the plan for a query.
 
@@ -437,6 +446,187 @@ flowchart LR
 
 The report gives the depth of the query, the number of fields it selects, and the number of calls. Then it gives one line for each level: the sources at that level, their number of calls, and their fields.
 
+## Getting Started - Client
+
+This guide calls a pet shop API from a Scala service with `torpor-client`. You write each operation one time, as GraphQL. When your code compiles, the client checks the operation against the schema, and makes the type of its response from the fields that it selects. Thus there are no case classes to keep in step with the operation, and the client does not generate code.
+
+The client needs only the schema. The server does not have to be a Torpor server.
+
+The client needs Scala 3.3 or later, cats-effect 3, circe 0.14 and http4s 0.23. In the samples, replace `@VERSION@` with the Torpor release that you use.
+
+### 1. Add the dependency
+
+```scala
+libraryDependencies += "net.andimiller" %% "torpor-client" % "@VERSION@"
+```
+
+### 2. Copy the schema
+
+`Api.sdl` takes the schema as a string that the compiler can read: a literal, or an `inline val`. Copy the schema that the server serves into a Scala object, such as from the golden file that the server's test writes (step 5 of [Getting Started - Server](#getting-started---server)). When the server's schema changes, change the object too. The compiler then checks again each operation that uses the schema.
+
+```scala mdoc:reset:silent
+// The schema that the server serves, as a constant
+object PetshopSchema {
+  inline val sdl = """
+    enum Species { DOG CAT }
+    type Pet { id: ID! name: String! species: Species! age: Int owner: Owner }
+    type Owner { name: String! pets: [Pet!]! }
+    type Shelter { name: String! capacity: Int! }
+    union Home = Owner | Shelter
+    input PetFilter { species: Species! minAge: Int }
+    type Query {
+      pets(species: Species, first: Int): [Pet!]!
+      search(filter: PetFilter!): [Pet!]!
+      home(pet: ID!): Home
+    }
+  """
+}
+```
+
+### 3. Bind the schema to your types
+
+Make the `Api` one time. Tell it which Scala type to read a leaf as: for one field, or for all the fields of a type. If you do not, an `ID` is a `String` and an `Int` is an `Int`. The compiler parses the schema one time, for all the operations that use it.
+
+```scala mdoc:silent
+import cats.effect.IO
+import io.circe.Decoder
+import net.andimiller.torpor.client.{Api, GraphQLClient, input}
+import org.http4s.client.Client
+import org.http4s.implicits.*
+
+final case class PetId(value: String)
+given Decoder[PetId] = Decoder.decodeString.map(PetId(_)) // How to read a PetId from the response
+
+val petshop = Api
+  .sdl(PetshopSchema.sdl) // The schema from step 2
+  .read["Pet.id", PetId]  // Read the field 'Pet.id' as a PetId
+  .read["Int", Long]      // Read every field of type 'Int' as a Long
+```
+
+The schema and the leaf types are part of the type of the `Api` value. Thus you do not need other imports where you write an operation, and a formatter cannot remove an import as unused.
+
+### 4. Write an operation
+
+An operation compiles only if the document is valid against the schema. The compiler makes its response type from the fields that it selects.
+
+```scala mdoc:silent
+val pets = petshop.operation(
+  """
+    query Pets($species: Species, $first: Int) { # Declare the variables
+      pets(species: $species, first: $first) {   # Select the root 'pets' field
+        id                                       # A PetId, from step 3
+        name                                     # A String
+        age                                      # An Option[Long]: 'age' can be null
+        owner { name }                           # An Option of a record with a 'name'
+      }
+    }
+  """
+)
+```
+
+An operation can be any string that the compiler can read: a literal, or literals and `inline val`s put together with `s"…"`. Thus operations can share a selection:
+
+```scala mdoc:silent
+inline val petFields = "id name age owner { name }" // A selection to share
+
+val everyPet = petshop.operation(
+  s"""
+    query EveryPet {
+      pets { $petFields }
+    }
+  """
+)
+```
+
+### 5. Make the client and run the operation
+
+The client takes an http4s `Client`, which adds headers, authentication and tracing, as for any other service. Give the variables by name, and read the response by field.
+
+If the response has errors, `run` fails with a `GraphQLFailure`, which has the message and the path of each error. If the response is not a GraphQL response, `run` fails with the http4s `UnexpectedStatus`.
+
+```scala mdoc:silent
+def client(http: Client[IO]): GraphQLClient[IO] =
+  new GraphQLClient[IO](http, uri"https://pets.example/graphql") // The URL of the GraphQL endpoint
+
+def names(client: GraphQLClient[IO]): IO[List[(PetId, String, Option[Long])]] =
+  client
+    .run(pets(first = 2))                                // Give the variables by name
+    .map(_.pets.map(pet => (pet.id, pet.name, pet.age))) // Read the response by field
+```
+
+### 6. Give variables
+
+The compiler checks each variable against the one that the document declares. You can omit a variable that can be null or that has a default, such as `species` above. An enum variable takes one of its values as a literal.
+
+A variable that you give as `None` is not sent, so the server uses the default of the variable. A variable that you give as `null` is sent as null.
+
+```scala mdoc:silent
+val dogs      = pets(species = "DOG") // An enum value, as a literal
+val unlimited = pets(first = None)    // 'first' is not sent
+val nullFirst = pets(first = null)    // 'first' is sent as null
+```
+
+Write an input object with `input(…)`. The compiler checks it against the input type where you give it. You can omit a field that can be null.
+
+```scala mdoc:silent
+val search = petshop.operation("query Search($filter: PetFilter!) { search(filter: $filter) { name } }")
+
+val oldDogs = search(filter = input(species = "DOG", minAge = 10)) // A PetFilter
+val anyCats = search(filter = input(species = "CAT"))              // 'minAge' is not sent
+```
+
+### 7. Read unions, optional fields and enums
+
+The response can omit a field that only some types select in a fragment, or a field behind `@skip` or `@include`. Thus that field is an `Option`. With `@include`, you ask for part of a response only when you need it.
+
+The `__typename` of a union or an interface is the union of the names of its types. If the document selects `__typename`, the response also has a view for each type, such as `asShelter`. A view is `Some` only when the server sent that type. In a view, a field of that type is an `Option` only if it can be null or is behind `@skip` or `@include`.
+
+```scala mdoc:silent
+val home = petshop.operation(
+  """
+    query Home($id: ID!, $withCapacity: Boolean!) {
+      home(pet: $id) {                                                # 'Home' is the union Owner | Shelter
+        __typename                                                    # "Owner" | "Shelter"
+        ... on Owner { name }                                         # Every member selects 'name'
+        ... on Shelter { name capacity @include(if: $withCapacity) }  # Only a Shelter has 'capacity'
+      }
+    }
+  """
+)
+
+def capacity(client: GraphQLClient[IO], id: String): IO[Option[Long]] =
+  client
+    .run(
+      home(
+        id = id,
+        withCapacity = true
+      )
+    )
+    .map(_.home.flatMap(_.asShelter).flatMap(_.capacity))
+```
+
+Every member of the union selects `name`, so `name` is a `String`. Only a `Shelter` selects `capacity`, so `capacity` is an `Option`. In the view `asShelter`, `capacity` is still an `Option`, because it is behind `@include`.
+
+An enum is a union of its values as string literals, such as `"DOG" | "CAT"`, unless the `Api` binds it to a type of your own with `read`.
+
+### 8. See what does not compile
+
+The compiler rejects an operation or a call that does not fit the schema, and tells you why:
+
+```scala mdoc:fail
+val withNickname = petshop.operation("{ pets { id nickname } }")  // 'Pet' has no field 'nickname'
+def speciesOf(data: pets.Data) = data.pets.map(_.species)         // 'pets' does not select 'species'
+```
+
+The compiler checks each variable, and each field of an input object:
+
+```scala mdoc:fail
+val birds     = pets(species = "BIRD")                                     // 'BIRD' is not a Species
+val twoPets   = pets(first = "two")                                        // 'first' is an Int
+val brownDogs = search(filter = input(species = "DOG", colour = "brown"))  // PetFilter has no field 'colour'
+val noSpecies = search(filter = input(minAge = 10))                        // 'species' is required
+```
+
 ## Examples
 
 The repository has two complete services. Both serve ESI, the public API of EVE Online.
@@ -466,6 +656,7 @@ These features work now:
 | HTTP | `POST /graphql`, with GraphQL errors as status 200, and a setup function for each request |
 | Tools | Introspection, `Explain.mermaid` and `Explain.report` |
 | Relay | `torpor-relay`: `Connection[A]`, `PageInfo` and `PageArgs` |
+| Client | `torpor-client`: an operation compiles only if it is valid against the schema, and `Api` makes its response type from the document. Variables are given by name and checked against the schema. Enums are unions of literals. `GraphQLClient` runs an operation over http4s. |
 
 These features are not built yet:
 
@@ -480,7 +671,7 @@ These features are not built yet:
 - **Not a federation gateway.** Sources are modules in your process, not remote GraphQL services.
 - **Not a SQL engine.** If your data is relational and the shape of the query is important, use [Grackle](https://github.com/typelevel/grackle).
 - **Not only for one effect type.** `Torpor[F]` works for any `F[_]: Concurrent`.
-- **Not a code generator.** [Caliban](https://github.com/ghostdogpr/caliban) generates code.
+- **Not a code generator.** `torpor-client` checks the operations that you write against a schema file, and the compiler makes their types. It does not generate code. [Caliban](https://github.com/ghostdogpr/caliban) generates code.
 - **Not complete.** [docs/roadmap.md](docs/roadmap.md) tells what comes next.
 
 ## Modules
@@ -495,6 +686,7 @@ These features are not built yet:
 | `torpor-explain` | The Mermaid plan and the report of calls for each level |
 | `torpor-relay` | Relay `Connection` and `PageInfo` slicing |
 | `torpor-http` | The http4s route, and the setup function for each request |
+| `torpor-client` | Operations that the compiler checks against a schema file, and an http4s client that runs them |
 | `torpor-testkit` | The golden test for the merged schema |
 
 Only `torpor-schema` uses Sangria, for the parser.

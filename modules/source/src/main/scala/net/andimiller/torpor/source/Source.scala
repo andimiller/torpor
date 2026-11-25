@@ -1,17 +1,27 @@
 package net.andimiller.torpor.source
 
-import cats.{Applicative, Functor}
+import cats.Functor
 import cats.data.NonEmptyList
 import cats.syntax.all._
 import io.circe.{Decoder, Encoder, Json, parser}
-import net.andimiller.torpor.core.{Argument, Arguments, FieldCoordinate, InvalidInputException, Resolver, Sdl, Step}
+import net.andimiller.torpor.core.{
+  Argument,
+  Arguments,
+  FieldCoordinate,
+  InvalidInputException,
+  Parent,
+  Resolved,
+  Resolver,
+  Sdl,
+  Step
+}
 
 /** A source: an SDL fragment plus the resolvers that serve it.
   *
   * Its type keeps what the resolvers erase. `Required` lists the fields its SDL needs resolved, as the `schema` macro
   * read them. `Facts` records, for each resolver, the field it serves, which GraphQL type it produces as which Scala
-  * type, and which Scala type a keyed field decodes its parent as. `Torpor[F](…)` reads both to check, when the code
-  * compiles, that every source resolves exactly its required fields, and that every keyed field can decode what each
+  * type, and which Scala type a keyed field reads its parent as. `Torpor[F](…)` reads both to check, when the code
+  * compiles, that every source resolves exactly its required fields, and that every keyed field can read what each
   * producer of its parent type produces.
   *
   * {{{
@@ -24,7 +34,7 @@ import net.andimiller.torpor.core.{Argument, Arguments, FieldCoordinate, Invalid
 final class Source[F[_], Id <: String, Required <: Tuple, Facts <: Tuple] private (
     val id: Id,
     val sdl: String,
-    private[source] val entries: List[(FieldCoordinate, Resolver[F])]
+    private[source] val entries: List[(FieldCoordinate, Links.ByProducer => Resolver[F])]
 ) {
 
   /** The resolvers that serve this source, as one argument list, given once. Anything that is not a resolver from the
@@ -57,12 +67,13 @@ object Source {
       new Source(id, sdl.text, Nil)
   }
 
-  private def entries[F[_]](resolvers: Matchable): List[(FieldCoordinate, Resolver[F])] = resolvers match {
-    case resolver: FieldResolver[F, ?] @unchecked => List(resolver.entry)
-    case tuple: Tuple                             =>
-      tuple.productIterator.toList.flatMap(element => entries[F](element.asInstanceOf[Matchable]))
-    case other                                    => throw new IllegalArgumentException(s"not a resolver: $other")
-  }
+  private def entries[F[_]](resolvers: Matchable): List[(FieldCoordinate, Links.ByProducer => Resolver[F])] =
+    resolvers match {
+      case resolver: FieldResolver[F, ?] @unchecked => List(resolver.entry)
+      case tuple: Tuple                             =>
+        tuple.productIterator.toList.flatMap(element => entries[F](element.asInstanceOf[Matchable]))
+      case other                                    => throw new IllegalArgumentException(s"not a resolver: $other")
+    }
 }
 
 /** A type-level fact about one resolver. Phantom: never instantiated. */
@@ -73,15 +84,21 @@ sealed trait Fact
   */
 sealed abstract class Produces[G <: String, B, Parent <: String, Field <: String] extends Fact
 
-/** The keyed resolver at `Parent.Field` decodes each parent, a value of GraphQL type `Parent`, as Scala type `P`. */
+/** The keyed resolver at `Parent.Field` reads each parent, a value of GraphQL type `Parent`, as Scala type `P`. */
 sealed abstract class Consumes[P, Parent <: String, Field <: String] extends Fact
 
-/** One resolver, erased to JSON for the executor, plus the facts it contributes to its source's type. */
-final class FieldResolver[F[_], Facts <: Tuple] private (private[source] val entry: (FieldCoordinate, Resolver[F]))
+/** One resolver, erased for the executor, plus the facts it contributes to its source's type. A keyed resolver is
+  * finished only when `Torpor[F](…)` gives it the links to its producers.
+  */
+final class FieldResolver[F[_], Facts <: Tuple] private (
+    private[source] val entry: (FieldCoordinate, Links.ByProducer => Resolver[F])
+)
 
 object FieldResolver {
   // inline methods cannot call a private constructor, so they come through here
-  private[source] def apply[F[_], Facts <: Tuple](entry: (FieldCoordinate, Resolver[F])): FieldResolver[F, Facts] =
+  private[source] def apply[F[_], Facts <: Tuple](
+      entry: (FieldCoordinate, Links.ByProducer => Resolver[F])
+  ): FieldResolver[F, Facts] =
     new FieldResolver(entry)
 }
 
@@ -197,22 +214,41 @@ object resolver {
       * makes one call for `cohorts(first: 2)` rather than one per workspace.
       */
     inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
-        Applicative[F],
+        Functor[F],
         Decoder[P],
-        Encoder[K],
-        Decoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
       FieldResolver(
-        keyedEntry[F, A, P, K, V](coordinate, extract, run)(using
-          summon[Applicative[F]],
+        keyedEntry[F, A, P, K, V](coordinate, (parent: P) => Some(extract(parent)), run)(using
+          summon[Functor[F]],
           Arguments.decoder[A],
           summon[Decoder[P]],
-          summon[Encoder[K]],
-          summon[Decoder[K]],
           summon[Encoder[V]]
         )
       )
+
+    /** Decode the arguments as `A2` instead, such as a case class with domain types the SDL cannot express. */
+    def args[A2]: KeyedField.Decoding[F, T, N, A2, R, P, K] =
+      new KeyedField.Decoding(coordinate, (parent: P) => Some(extract(parent)))
+  }
+
+  object KeyedField {
+
+    /** A keyed field whose arguments decode with the `Decoder[A]` in scope. Because nothing here is typed from the SDL,
+      * one function can serve the same field on several types, such as every implementer of an interface.
+      */
+    final class Decoding[F[_], T <: String, N <: String, A, R <: String, P, K](
+        coordinate: FieldCoordinate,
+        extract: P => Option[K]
+    ) {
+      def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
+          Functor[F],
+          Decoder[A],
+          Decoder[P],
+          Encoder[V]
+      ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
+        FieldResolver(keyedEntry[F, A, P, K, V](coordinate, extract, run))
+    }
   }
 
   /** A keyed field whose key may be absent (a nullable foreign key). Absent keys are never sent to `batch`; they
@@ -237,108 +273,90 @@ object resolver {
       extract: P => Option[K]
   ) {
     inline def batch[V](run: (A, NonEmptyList[K]) => F[Map[K, V]])(using
-        Applicative[F],
+        Functor[F],
         Decoder[P],
-        Encoder[K],
-        Decoder[K],
         Encoder[V]
     ): FieldResolver[F, (Consumes[P, T, N], Produces[R, V, T, N])] =
       FieldResolver(
-        optionalKeyedEntry[F, A, P, K, V](coordinate, extract, run)(using
-          summon[Applicative[F]],
+        keyedEntry[F, A, P, K, V](coordinate, extract, run)(using
+          summon[Functor[F]],
           Arguments.decoder[A],
           summon[Decoder[P]],
-          summon[Encoder[K]],
-          summon[Decoder[K]],
           summon[Encoder[V]]
         )
       )
+
+    /** Decode the arguments as `A2` instead, such as a case class with domain types the SDL cannot express. */
+    def args[A2]: KeyedField.Decoding[F, T, N, A2, R, P, K] = new KeyedField.Decoding(coordinate, extract)
   }
 
   // the erased resolvers the executor runs
 
-  /** Not a valid JSON key encoding, so it cannot collide with a real key: encoded keys start with a JSON token. */
-  private val AbsentKey = "\u0000absent"
-
   private def argumentsJson(arguments: List[Argument]): Json =
     Json.obj(arguments.map(a => a.name -> a.value.toJson): _*)
+
+  private def resolved[B: Encoder](value: B): Resolved       = Resolved(Encoder[B].apply(value), value)
 
   private def rootEntry[F[_]: Functor, A: Decoder, B: Encoder](
       coordinate: FieldCoordinate,
       run: A => F[B]
-  ): (FieldCoordinate, Resolver[F])                          =
-    coordinate -> Resolver.Root { arguments =>
-      Decoder[A].decodeJson(argumentsJson(arguments)) match {
-        case Left(error)    => throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
-        case Right(decoded) => run(decoded).map(Encoder[B].apply)
-      }
-    }
+  ): (FieldCoordinate, Links.ByProducer => Resolver[F]) =
+    coordinate -> (_ => Resolver.Root(arguments => run(decodeArguments[A](coordinate, arguments)).map(resolved(_))))
 
   private def suspendingEntry[F[_]: Functor, A: Decoder, H: Encoder: Decoder, B: Encoder](
       coordinate: FieldCoordinate,
       start: A => F[Step[B, H]],
       resume: (H, Json) => F[Step[B, H]]
-  ): (FieldCoordinate, Resolver[F]) = {
-    def encoded(step: F[Step[B, H]]): F[Step[Json, Json]] = step.map {
-      case Step.Complete(value) => Step.Complete(Encoder[B].apply(value))
+  ): (FieldCoordinate, Links.ByProducer => Resolver[F]) = {
+    def encoded(step: F[Step[B, H]]): F[Step[Resolved, Json]] = step.map {
+      case Step.Complete(value) => Step.Complete(resolved(value))
       case Step.Suspend(handle) => Step.Suspend(Encoder[H].apply(handle))
     }
 
-    coordinate -> Resolver.Suspending(
-      start = arguments =>
-        Decoder[A].decodeJson(argumentsJson(arguments)) match {
-          case Left(error)    =>
-            throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
-          case Right(decoded) => encoded(start(decoded))
-        },
-      resume = (handle, payload) =>
-        parser.parse(handle.noSpaces).flatMap(Decoder[H].decodeJson) match {
-          case Left(error)    => throw new InvalidInputException(s"cannot decode handle for ${coordinate.render}: $error")
-          case Right(decoded) => encoded(resume(decoded, payload))
-        }
+    coordinate -> (_ =>
+      Resolver.Suspending(
+        start = arguments => encoded(start(decodeArguments[A](coordinate, arguments))),
+        resume = (handle, payload) =>
+          parser.parse(handle.noSpaces).flatMap(Decoder[H].decodeJson) match {
+            case Left(error)    =>
+              throw new InvalidInputException(s"cannot decode handle for ${coordinate.render}: $error")
+            case Right(decoded) => encoded(resume(decoded, payload))
+          }
+      )
     )
   }
 
-  private def keyedEntry[F[_]: Applicative, A: Decoder, P: Decoder, K: Encoder: Decoder, V: Encoder](
-      coordinate: FieldCoordinate,
-      extract: P => K,
-      run: (A, NonEmptyList[K]) => F[Map[K, V]]
-  ): (FieldCoordinate, Resolver[F]) =
-    coordinate -> Resolver.Batch(
-      key = value =>
-        Decoder[P].decodeJson(value) match {
-          case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
-          case Right(p)    => Right(keyString(extract(p)))
-        },
-      batch = (arguments, keys) =>
-        run(decodeArguments[A](coordinate, arguments), keys.map(decodeKey[K](coordinate, _)))
-          .map(_.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) })
-    )
-
-  private def optionalKeyedEntry[F[_]: Applicative, A: Decoder, P: Decoder, K: Encoder: Decoder, V: Encoder](
+  /** The executor dedupes keys by Scala equality and hands them back to `run` as they are, so a key needs no codec. */
+  private def keyedEntry[F[_]: Functor, A: Decoder, P: Decoder, K, V: Encoder](
       coordinate: FieldCoordinate,
       extract: P => Option[K],
       run: (A, NonEmptyList[K]) => F[Map[K, V]]
-  ): (FieldCoordinate, Resolver[F]) =
-    coordinate -> Resolver.Batch(
-      key = value =>
-        Decoder[P].decodeJson(value) match {
-          case Left(error) => Left(s"cannot decode parent value for ${coordinate.render}: $error")
-          case Right(p)    => Right(extract(p).fold(AbsentKey)(keyString(_)))
-        },
-      batch = (arguments, keys) => {
-        val decoded = decodeArguments[A](coordinate, arguments)
-        val present = keys.toList.filterNot(_ == AbsentKey).distinct
-        NonEmptyList.fromList(present) match {
-          case None      => Applicative[F].pure(Map(AbsentKey -> Json.Null))
-          case Some(nel) =>
-            run(decoded, nel.map(decodeKey[K](coordinate, _)))
-              .map(results =>
-                results.map { case (k, v) => keyString(k) -> Encoder[V].apply(v) } + (AbsentKey -> Json.Null)
-              )
-        }
-      }
+  ): (FieldCoordinate, Links.ByProducer => Resolver[F]) =
+    coordinate -> (links =>
+      Resolver.Batch[F, K](
+        key = parent => parentAs[P](coordinate, links, parent).map(extract),
+        batch = (arguments, keys) =>
+          run(decodeArguments[A](coordinate, arguments), keys)
+            .map(_.map { case (key, value) => key -> resolved(value) })
+      )
     )
+
+  /** A parent that a linked resolver produced in this run is read as it is. Otherwise it is decoded from its JSON: a
+    * value nested inside another value, one a hook replaced, or one restored from a snapshot.
+    */
+  private def parentAs[P: Decoder](
+      coordinate: FieldCoordinate,
+      links: Links.ByProducer,
+      parent: Parent
+  ): Either[String, P] =
+    parent.produced.flatMap(produced => links.get(produced.by).map(link => link(produced.value))) match {
+      case Some(value) => Right(value.asInstanceOf[P])
+      case None        =>
+        Decoder[P]
+          .decodeJson(parent.json)
+          .left
+          .map(error => s"cannot decode parent value for ${coordinate.render}: $error")
+    }
 
   private def decodeArguments[A: Decoder](
       coordinate: FieldCoordinate,
@@ -349,13 +367,4 @@ object resolver {
         throw new InvalidInputException(s"cannot decode arguments for ${coordinate.render}: $error")
       case Right(decoded) => decoded
     }
-
-  private def keyString[K: Encoder](key: K): String = Encoder[K].apply(key).noSpaces
-
-  private def decodeKey[K: Decoder](coordinate: FieldCoordinate, encoded: String): K =
-    parser
-      .parse(encoded)
-      .toOption
-      .flatMap(Decoder[K].decodeJson(_).toOption)
-      .getOrElse(throw new InvalidInputException(s"cannot decode batch key '$encoded' for ${coordinate.render}"))
 }
