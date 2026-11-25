@@ -27,8 +27,9 @@ abstract class Hooks[F[_]](using protected val F: Applicative[F]) { self =>
   /** After a request was planned and executed. */
   def onQuery(query: String, elapsed: FiniteDuration): F[Unit] = F.unit
 
-  /** Runs once per node with every value it produced, keyed by encoded batch key (`""` for a root field). A `Left`
-    * replaces that value with a null and a field error; a missing key keeps the value unchanged.
+  /** Runs once per node with every value it produced. Each value has an id that is good only for this call (`""` for a
+    * root field); the id is not the batch key, so a decision reads the value. A `Left` replaces that value with a null
+    * and a field error; a missing id keeps the value unchanged.
     */
   def authorize(
       coordinate: FieldCoordinate,
